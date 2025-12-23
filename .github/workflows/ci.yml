@@ -53,7 +53,7 @@ jobs:
 
       - name: Run go vet
         run: |
-          go vet -tags=!gui ./cmd/bridge
+          go vet ./cmd/bridge
           go vet -tags=gui ./cmd/bridge
           go vet ./pkg/...
 
