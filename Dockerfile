@@ -10,12 +10,15 @@ RUN go mod download
 
 COPY . .
 
+# ensure dependencies are resolved
+RUN go mod tidy
+
 # build args for cross compilation
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# build the binary
+# build the binary (CLI mode, no GUI - default build excludes gui tag)
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} \
     go build -ldflags="-w -s" -o /bridge ./cmd/bridge
 
