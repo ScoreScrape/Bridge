@@ -15,12 +15,20 @@ func runCLI() {
 		log.Fatal("BRIDGE_ID environment variable is required for CLI mode")
 	}
 
-	// Hardcode the device path inside the container
+	// Hardcoded expected device path
 	serialPort := "/dev/ttyUSB0"
 
-	// Verify the specified port exists
+	// Check if serial port exists
 	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
-		log.Fatalf("Serial port does not exist: %s. Ensure the device is properly mapped in docker-compose.yml", serialPort)
+		log.Printf(`
+Oops! Looks like the serial port is not configured correctly.
+
+In your docker config, make sure the serial port is mapped correctly.
+Make sure to only change the FIRST device path.
+Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
+`)
+
+		log.Fatal("Serial port configuration error")
 	}
 
 	sigChan := make(chan os.Signal, 1)
