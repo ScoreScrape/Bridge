@@ -11,25 +11,16 @@ import (
 
 func runCLI() {
 	bridgeID := os.Getenv("BRIDGE_ID")
-	serialPort := os.Getenv("SERIAL_PORT")
-
 	if bridgeID == "" {
 		log.Fatal("BRIDGE_ID environment variable is required for CLI mode")
 	}
 
-	// If no serial port specified, try to find an available port
-	if serialPort == "" {
-		ports, err := bridge.GetAvailablePorts()
-		if err != nil {
-			log.Fatalf("Failed to list available ports: %v", err)
-		}
+	// Hardcode the device path inside the container
+	serialPort := "/dev/ttyUSB0"
 
-		if len(ports) == 0 {
-			log.Fatal("No serial ports available. Please specify SERIAL_PORT.")
-		}
-
-		serialPort = ports[0]
-		log.Printf("No SERIAL_PORT specified. Using first available port: %s", serialPort)
+	// Verify the specified port exists
+	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
+		log.Fatalf("Serial port does not exist: %s. Ensure the device is properly mapped in docker-compose.yml", serialPort)
 	}
 
 	sigChan := make(chan os.Signal, 1)
