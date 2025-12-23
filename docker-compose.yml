@@ -6,4 +6,6 @@ services:
       - BRIDGE_ID=YOUR_BRIDGE_ID_HERE
     devices:
       - /dev/ttyUSB0:/dev/ttyUSB0
+    group_add:
+      - dialout
     restart: unless-stopped
