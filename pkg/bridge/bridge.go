@@ -77,7 +77,7 @@ type MQTTClient struct {
 }
 
 func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTClient {
-	opts := mqtt.NewClientOptions().AddBroker(broker).SetClientID(clientID).SetAutoReconnect(false)
+	opts := mqtt.NewClientOptions().AddBroker(broker).SetClientID(clientID).SetAutoReconnect(true).SetMaxReconnectInterval(10 * time.Second)
 	if lwtTopic != "" && lwtPayload != nil {
 		opts.SetWill(lwtTopic, string(lwtPayload), 0, true)
 	}
@@ -108,6 +108,13 @@ func (m *MQTTClient) Subscribe(topic string, h func([]byte)) error {
 }
 
 func (m *MQTTClient) Publish(topic string, data []byte) error {
+	token := m.client.Publish(topic, 0, false, data)
+	// Don't wait for completion to avoid blocking - fire and forget for better performance
+	// The MQTT client will handle retries internally
+	return nil
+}
+
+func (m *MQTTClient) PublishSync(topic string, data []byte) error {
 	return m.client.Publish(topic, 0, false, data).Error()
 }
 
@@ -132,6 +139,8 @@ type Bridge struct {
 	lastDataTime     int64
 	currentBaudRate  int
 	currentPortName  string
+	stopChan         chan struct{}
+	publishQueue     chan []byte
 }
 
 func New(bridgeID string) *Bridge {
@@ -140,6 +149,8 @@ func New(bridgeID string) *Bridge {
 		dataTopic:    fmt.Sprintf("bridges/%s/data", bridgeID),
 		frameBuffer:  make([]byte, 0, 1024),
 		lastDataTime: time.Now().UnixNano(),
+		stopChan:     make(chan struct{}),
+		publishQueue: make(chan []byte, 100), // Buffer up to 100 frames
 	}
 }
 

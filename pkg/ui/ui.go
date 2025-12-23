@@ -4,8 +4,8 @@ import (
 	"bridge/pkg/bridge"
 	"bytes"
 	_ "embed"
-	"fmt"
 	"image/color"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -33,31 +33,30 @@ const (
 )
 
 type App struct {
-	fyneApp        fyne.App
-	window         fyne.Window
-	bridge         *bridge.Bridge
-	portSelect     *widget.Select
-	bridgeIDEntry  *widget.Entry
-	connectBtn     *widget.Button
-	statusLabel    *canvas.Text
-	statusDot      *canvas.Circle
-	rxIndicator    *canvas.Circle
-	logEntry       *widget.Entry
-	dataEntry      *widget.Entry
-	leftContent    *fyne.Container
-	debugContainer *fyne.Container
-	showDebugBtn   *widget.Button
-	portLabel      *widget.Label
-	portContainer  *fyne.Container
-	state          ConnectionState
-	showDebug      bool
+	fyneApp       fyne.App
+	window        fyne.Window
+	bridge        *bridge.Bridge
+	portSelect    *widget.Select
+	bridgeIDEntry *widget.Entry
+	connectBtn    *widget.Button
+	statusLabel   *canvas.Text
+	statusDot     *canvas.Circle
+	rxIndicator   *canvas.Circle
+	leftContent   *fyne.Container
+	portLabel     *widget.Label
+	portContainer *fyne.Container
+	state         ConnectionState
+	rxTimer       *time.Timer
+	rxTimerMutex  sync.Mutex
 }
 
 func NewApp() *App {
 	a := app.NewWithID("io.scorescrape.bridge")
 	a.Settings().SetTheme(&ShadcnTheme{})
 	w := a.NewWindow("ScoreScrape Bridge")
-	w.Resize(fyne.NewSize(400, 500))
+	w.Resize(fyne.NewSize(380, 420))
+	w.CenterOnScreen()
+	w.SetFixedSize(true)
 	if len(IconBytes) > 0 {
 		icon := fyne.NewStaticResource("Icon.png", IconBytes)
 		a.SetIcon(icon)
@@ -77,16 +76,16 @@ func (a *App) Run() {
 func (a *App) buildUI() {
 	logo := canvas.NewImageFromReader(bytes.NewReader(DarkLogoBytes), "logo.png")
 	logo.FillMode = canvas.ImageFillContain
-	logo.SetMinSize(fyne.NewSize(200, 50))
+	logo.SetMinSize(fyne.NewSize(180, 45))
 
 	a.statusDot = canvas.NewCircle(color.RGBA{100, 100, 100, 255})
-	a.statusDot.Resize(fyne.NewSize(8, 8))
+	a.statusDot.Resize(fyne.NewSize(10, 10))
 	a.rxIndicator = canvas.NewCircle(color.RGBA{100, 100, 100, 255})
-	a.rxIndicator.Resize(fyne.NewSize(6, 6))
+	a.rxIndicator.Resize(fyne.NewSize(8, 8))
 
 	a.statusLabel = canvas.NewText("DISCONNECTED", color.RGBA{150, 150, 150, 255})
 	a.statusLabel.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
-	a.statusLabel.TextSize = 11
+	a.statusLabel.TextSize = 12
 
 	a.portSelect = widget.NewSelect([]string{}, nil)
 	a.portSelect.PlaceHolder = "Select Serial Port..."
@@ -97,6 +96,8 @@ func (a *App) buildUI() {
 	a.portContainer = container.NewMax(a.portSelect, container.NewCenter(a.portLabel))
 
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { a.refreshPorts() })
+	refreshBtn.Importance = widget.MediumImportance
+	
 	a.bridgeIDEntry = widget.NewEntry()
 	a.bridgeIDEntry.PlaceHolder = "Paste Bridge ID"
 
@@ -104,61 +105,83 @@ func (a *App) buildUI() {
 	a.connectBtn.SetIcon(theme.LoginIcon())
 	a.connectBtn.Importance = widget.HighImportance
 
-	a.showDebugBtn = widget.NewButton("Show Logs", func() { a.toggleDebug() })
-	a.showDebugBtn.SetIcon(theme.ListIcon())
+	// Improved spacing and layout
+	statusRow := container.NewHBox(
+		layout.NewSpacer(),
+		container.NewPadded(a.statusDot),
+		container.NewPadded(a.statusLabel),
+		container.NewPadded(a.rxIndicator),
+		container.NewPadded(widget.NewLabel("RX")),
+		layout.NewSpacer(),
+	)
+	
+	form := container.NewVBox(
+		widget.NewLabelWithStyle("SERIAL PORT", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewBorder(nil, nil, nil, refreshBtn, a.portContainer),
+		container.NewPadded(widget.NewLabel("")),
+		widget.NewLabelWithStyle("BRIDGE ID", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		a.bridgeIDEntry,
+	)
 
-	statusRow := container.NewHBox(layout.NewSpacer(), container.NewPadded(a.statusDot), a.statusLabel, container.NewPadded(a.rxIndicator), widget.NewLabel("RX"), layout.NewSpacer())
-	form := container.NewVBox(widget.NewLabelWithStyle("SERIAL PORT", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), container.NewBorder(nil, nil, nil, refreshBtn, a.portContainer), widget.NewLabel(""), widget.NewLabelWithStyle("BRIDGE ID", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), a.bridgeIDEntry)
+	card := widget.NewCard("Configuration", "", form)
 
-	a.dataEntry = widget.NewMultiLineEntry()
-	a.dataEntry.Disable()
-	a.logEntry = widget.NewMultiLineEntry()
-	a.logEntry.Disable()
-	tabs := container.NewAppTabs(container.NewTabItemWithIcon("Live Data", theme.DocumentIcon(), container.NewPadded(a.dataEntry)), container.NewTabItemWithIcon("System Logs", theme.ListIcon(), container.NewPadded(a.logEntry)))
-	a.debugContainer = container.NewPadded(tabs)
-	a.debugContainer.Hide()
-
-	a.leftContent = container.NewVBox(container.NewPadded(logo), statusRow, widget.NewSeparator(), container.NewPadded(widget.NewCard("Configuration", "Setup bridge", form)), container.NewPadded(a.connectBtn), layout.NewSpacer(), widget.NewSeparator(), container.NewPadded(a.showDebugBtn))
+	a.leftContent = container.NewVBox(
+		container.NewPadded(logo),
+		container.NewPadded(statusRow),
+		container.NewPadded(widget.NewSeparator()),
+		container.NewPadded(card),
+		container.NewPadded(a.connectBtn),
+		layout.NewSpacer(),
+	)
 	a.window.SetContent(a.leftContent)
 }
 
-func (a *App) toggleDebug() {
-	if a.showDebug {
-		a.showDebugBtn.SetText("Show Logs")
-		a.window.SetContent(a.leftContent)
-		a.window.Resize(fyne.NewSize(400, 500))
-	} else {
-		a.showDebugBtn.SetText("Hide Logs")
-		split := container.NewHSplit(a.leftContent, a.debugContainer)
-		split.SetOffset(0.4)
-		a.window.SetContent(split)
-		a.window.Resize(fyne.NewSize(900, 500))
-	}
-	a.showDebug = !a.showDebug
-}
-
-func (a *App) addLog(msg string) {
-	if !a.showDebug {
-		return
-	}
-	a.logEntry.SetText(a.logEntry.Text + fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05"), msg))
-	a.logEntry.CursorRow = len(a.logEntry.Text)
-}
 
 func (a *App) updateState(s ConnectionState) {
 	colors := map[ConnectionState]color.Color{StateDisconnected: color.RGBA{100, 100, 100, 255}, StateConnected: color.RGBA{34, 197, 94, 255}, StateError: color.RGBA{239, 68, 68, 255}, StateConnecting: color.RGBA{103, 103, 228, 255}}
 	texts := map[ConnectionState]string{StateDisconnected: "DISCONNECTED", StateConnected: "CONNECTED", StateError: "ERROR", StateConnecting: "CONNECTING"}
+	
+	// Batch UI updates to avoid multiple refreshes
 	a.statusDot.FillColor = colors[s]
-	a.statusDot.Refresh()
 	a.statusLabel.Text = texts[s]
 	a.statusLabel.Color = colors[s]
-	a.statusLabel.Refresh()
 	a.state = s
+	
+	// Single refresh call for better performance
+	a.statusDot.Refresh()
+	a.statusLabel.Refresh()
+	a.updateButtonState()
+}
+
+func (a *App) updateButtonState() {
+	if a.connectBtn == nil {
+		return
+	}
+	// Fyne widgets are thread-safe, can update directly
+	if a.state == StateConnected || a.state == StateConnecting {
+		a.connectBtn.SetText("Disconnect Bridge")
+		a.connectBtn.SetIcon(theme.LogoutIcon())
+		// Low importance for disconnect action (grey color)
+		a.connectBtn.Importance = widget.LowImportance
+	} else {
+		a.connectBtn.SetText("Connect Bridge")
+		a.connectBtn.SetIcon(theme.LoginIcon())
+		// High importance for primary action (blue/green color)
+		a.connectBtn.Importance = widget.HighImportance
+	}
+	// Refresh button to ensure visual changes take effect
+	a.connectBtn.Refresh()
 }
 
 func (a *App) refreshPorts() {
-	ports, _ := bridge.GetAvailablePorts()
-	a.portSelect.SetOptions(ports)
+	// Run port refresh in background to avoid blocking UI
+	go func() {
+		ports, _ := bridge.GetAvailablePorts()
+		// Fyne widgets are thread-safe
+		if a.portSelect != nil {
+			a.portSelect.SetOptions(ports)
+		}
+	}()
 }
 
 func (a *App) loadPreferences() {
@@ -170,6 +193,7 @@ func (a *App) toggleConnection() {
 		if a.bridge != nil {
 			a.bridge.Disconnect()
 		}
+		a.resetRxIndicator()
 		a.updateState(StateDisconnected)
 	} else {
 		go a.connectAndRun(a.bridgeIDEntry.Text, a.portSelect.Selected)
@@ -187,28 +211,24 @@ func (a *App) connectAndRun(id, port string) {
 	a.updateState(StateConnecting)
 
 	a.bridge.SetConnectionLostHandler(func(err error) {
-		a.addLog(fmt.Sprintf("Connection lost: %v", err))
 		a.updateState(StateError)
 		a.reconnect(id, port)
 	})
 
 	if err := a.bridge.Connect(port, 9600); err != nil {
-		a.addLog(fmt.Sprintf("Connection failed: %v", err))
 		a.updateState(StateError)
 		return
 	}
 
 	a.updateState(StateConnected)
-	a.addLog("Connected successfully")
 
 	err := a.bridge.Start(func(d []byte) {
-		if a.showDebug {
-			a.dataEntry.SetText(a.dataEntry.Text + string(d))
-		}
-	}, func(m string) { a.addLog(m) })
+		a.onRxData()
+	}, func(m string) {
+		// Logging disabled - app is simplified to just send data
+	})
 
 	if err != nil && a.state == StateConnected {
-		a.addLog(fmt.Sprintf("Bridge stopped: %v", err))
 		a.updateState(StateError)
 		a.reconnect(id, port)
 	}
@@ -220,9 +240,49 @@ func (a *App) reconnect(id, port string) {
 	}
 	time.Sleep(2 * time.Second)
 	if a.state == StateError {
-		a.addLog("Attempting to reconnect...")
 		go a.connectAndRun(id, port)
 	}
+}
+
+func (a *App) onRxData() {
+	a.rxTimerMutex.Lock()
+	defer a.rxTimerMutex.Unlock()
+
+	// Stop existing timer if it exists
+	if a.rxTimer != nil {
+		a.rxTimer.Stop()
+	}
+
+	// Only update indicator if it's not already green (avoid unnecessary refreshes)
+	if a.rxIndicator.FillColor != (color.RGBA{34, 197, 94, 255}) {
+		a.rxIndicator.FillColor = color.RGBA{34, 197, 94, 255}
+		a.rxIndicator.Refresh()
+	}
+
+	// Create a new timer that will turn off the indicator after 3 seconds
+	a.rxTimer = time.AfterFunc(3*time.Second, func() {
+		a.rxTimerMutex.Lock()
+		defer a.rxTimerMutex.Unlock()
+		// Turn off RX indicator (gray)
+		a.rxIndicator.FillColor = color.RGBA{100, 100, 100, 255}
+		a.rxIndicator.Refresh()
+		a.rxTimer = nil
+	})
+}
+
+func (a *App) resetRxIndicator() {
+	a.rxTimerMutex.Lock()
+	defer a.rxTimerMutex.Unlock()
+
+	// Stop timer if it exists
+	if a.rxTimer != nil {
+		a.rxTimer.Stop()
+		a.rxTimer = nil
+	}
+
+	// Reset RX indicator to gray - Fyne handles thread safety
+	a.rxIndicator.FillColor = color.RGBA{100, 100, 100, 255}
+	a.rxIndicator.Refresh()
 }
 
 // ShadcnTheme implementation
