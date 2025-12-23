@@ -32,7 +32,8 @@ fyne_metadata_init.go
 # Build Output
 /bridge
 *.app
-bridge
+/bridge
+^bridge$
 
 # Dev Recordings
 recordings/
