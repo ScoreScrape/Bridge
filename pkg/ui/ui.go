@@ -97,7 +97,7 @@ func (a *App) buildUI() {
 
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { a.refreshPorts() })
 	refreshBtn.Importance = widget.MediumImportance
-	
+
 	a.bridgeIDEntry = widget.NewEntry()
 	a.bridgeIDEntry.PlaceHolder = "Paste Bridge ID"
 
@@ -114,7 +114,7 @@ func (a *App) buildUI() {
 		container.NewPadded(widget.NewLabel("RX")),
 		layout.NewSpacer(),
 	)
-	
+
 	form := container.NewVBox(
 		widget.NewLabelWithStyle("SERIAL PORT", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewBorder(nil, nil, nil, refreshBtn, a.portContainer),
@@ -136,17 +136,16 @@ func (a *App) buildUI() {
 	a.window.SetContent(a.leftContent)
 }
 
-
 func (a *App) updateState(s ConnectionState) {
 	colors := map[ConnectionState]color.Color{StateDisconnected: color.RGBA{100, 100, 100, 255}, StateConnected: color.RGBA{34, 197, 94, 255}, StateError: color.RGBA{239, 68, 68, 255}, StateConnecting: color.RGBA{103, 103, 228, 255}}
 	texts := map[ConnectionState]string{StateDisconnected: "DISCONNECTED", StateConnected: "CONNECTED", StateError: "ERROR", StateConnecting: "CONNECTING"}
-	
+
 	// Batch UI updates to avoid multiple refreshes
 	a.statusDot.FillColor = colors[s]
 	a.statusLabel.Text = texts[s]
 	a.statusLabel.Color = colors[s]
 	a.state = s
-	
+
 	// Single refresh call for better performance
 	a.statusDot.Refresh()
 	a.statusLabel.Refresh()

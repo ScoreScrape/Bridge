@@ -303,7 +303,7 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 			// Make a copy of the data since buf is reused
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			
+
 			now := time.Now().UnixNano()
 			b.mu.Lock()
 			b.lastDataTime = now
@@ -393,7 +393,7 @@ func (b *Bridge) processSerialData(data []byte) [][]byte {
 func (b *Bridge) Disconnect() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	// Signal stop to worker goroutines (only once)
 	select {
 	case <-b.stopChan:
@@ -401,7 +401,7 @@ func (b *Bridge) Disconnect() error {
 	default:
 		close(b.stopChan)
 	}
-	
+
 	if b.mqttClient != nil && b.mqttClient.IsConnected() {
 		statusTopic := fmt.Sprintf("bridges/%s/status", b.bridgeID)
 		offlinePayload, _ := json.Marshal(StatusUpdate{Status: "offline"})
