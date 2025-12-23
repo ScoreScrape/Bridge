@@ -1,0 +1,8 @@
+services:
+  bridge:
+    image: ghcr.io/scorescrape/bridge:latest
+    container_name: scorescrape-bridge
+    environment:
+      - BRIDGE_ID=${BRIDGE_ID}
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyUSB0}
+    restart: unless-stopped

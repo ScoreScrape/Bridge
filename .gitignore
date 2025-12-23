@@ -1,0 +1,43 @@
+# Binaries
+*.app
+*.exe
+*.dmg
+*.msi
+
+# Build output
+dist/
+build/
+
+# IDE
+.vscode/
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# MacOS BS
+.DS_Store
+Thumbs.db
+
+# Go
+*.test
+*.out
+go.work
+fyne_metadata_init.go
+
+# Local Docker Build
+*.env
+
+# Build Output
+/bridge
+*.app
+bridge
+
+# Dev Recordings
+recordings/
+
+# Internal Dev Build Scripts
+*.sh
+
+TEMP-README.md
