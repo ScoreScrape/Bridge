@@ -108,9 +108,9 @@ func (m *MQTTClient) Subscribe(topic string, h func([]byte)) error {
 }
 
 func (m *MQTTClient) Publish(topic string, data []byte) error {
-	token := m.client.Publish(topic, 0, false, data)
 	// Don't wait for completion to avoid blocking - fire and forget for better performance
 	// The MQTT client will handle retries internally
+	_ = m.client.Publish(topic, 0, false, data)
 	return nil
 }
 
@@ -157,6 +157,21 @@ func New(bridgeID string) *Bridge {
 func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = h }
 
 func (b *Bridge) Connect(portName string, baudRate int) error {
+	b.mu.Lock()
+	// Recreate channels if they were closed (e.g., after Disconnect)
+	select {
+	case <-b.stopChan:
+		// Channel was closed, recreate it
+		b.stopChan = make(chan struct{})
+		b.publishQueue = make(chan []byte, 100)
+	default:
+		// Channel is still open, check if publishQueue needs recreation
+		if b.publishQueue == nil {
+			b.publishQueue = make(chan []byte, 100)
+		}
+	}
+	b.mu.Unlock()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -216,10 +231,55 @@ func (b *Bridge) reconnectWithBaudRate(baud int) error {
 }
 
 func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
+	// Start async publisher goroutine
+	go b.publishWorker()
+
+	// Start timeout checker goroutine
+	timeoutDuration := 100 * time.Millisecond
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-b.stopChan:
+				return
+			case <-ticker.C:
+				b.mu.Lock()
+				now := time.Now().UnixNano()
+				mqtt := b.mqttClient
+				if len(b.frameBuffer) > 0 && (now-b.lastDataTime) > int64(timeoutDuration) {
+					// Make a copy of the buffer before publishing
+					bufCopy := make([]byte, len(b.frameBuffer))
+					copy(bufCopy, b.frameBuffer)
+					b.frameBuffer = b.frameBuffer[:0]
+					b.inFrame = false
+					b.mu.Unlock()
+
+					// Queue the flushed buffer
+					if mqtt != nil {
+						select {
+						case b.publishQueue <- bufCopy:
+						default:
+							// Queue full, frame dropped
+						}
+					}
+				} else {
+					b.mu.Unlock()
+				}
+			}
+		}
+	}()
+
 	buf := make([]byte, 1024)
 	for {
+		select {
+		case <-b.stopChan:
+			return nil
+		default:
+		}
+
 		b.mu.RLock()
-		port, mqtt, topic := b.serialPort, b.mqttClient, b.dataTopic
+		port, mqtt := b.serialPort, b.mqttClient
 		b.mu.RUnlock()
 
 		if port == nil || mqtt == nil {
@@ -228,55 +288,99 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 
 		n, err := port.Read(buf)
 		if err != nil {
-			return err
+			// Serial read error - check if we should stop or retry
+			select {
+			case <-b.stopChan:
+				return nil
+			default:
+				// Retry after delay
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 		}
 
 		if n > 0 {
-			data := buf[:n]
+			// Make a copy of the data since buf is reused
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			
+			now := time.Now().UnixNano()
 			b.mu.Lock()
-			b.lastDataTime = time.Now().UnixNano()
+			b.lastDataTime = now
 			b.mu.Unlock()
 
 			if onData != nil {
 				onData(data)
 			}
-			for _, frame := range b.processSerialData(data) {
+
+			// Process frames with proper locking
+			frames := b.processSerialData(data)
+			for _, frame := range frames {
 				if len(frame) > 0 {
-					mqtt.Publish(topic, frame)
+					select {
+					case b.publishQueue <- frame:
+						// Frame queued successfully
+					case <-b.stopChan:
+						return nil
+					default:
+						// Queue full, drop frame (or could log warning)
+						// In production, you might want to use a larger buffer or handle this differently
+					}
 				}
 			}
 		}
+	}
+}
 
-		// Flush buffer on timeout (100ms)
-		b.mu.Lock()
-		if len(b.frameBuffer) > 0 && (time.Now().UnixNano()-b.lastDataTime) > 100*int64(time.Millisecond) {
-			mqtt.Publish(topic, b.frameBuffer)
-			b.frameBuffer = b.frameBuffer[:0]
-			b.inFrame = false
+func (b *Bridge) publishWorker() {
+	for {
+		select {
+		case <-b.stopChan:
+			return
+		case frame := <-b.publishQueue:
+			b.mu.RLock()
+			mqtt := b.mqttClient
+			topic := b.dataTopic
+			b.mu.RUnlock()
+
+			if mqtt != nil && mqtt.IsConnected() && len(frame) > 0 {
+				mqtt.Publish(topic, frame)
+			}
 		}
-		b.mu.Unlock()
 	}
 }
 
 func (b *Bridge) processSerialData(data []byte) [][]byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	var frames [][]byte
 	for _, db := range data {
 		switch db {
 		case STX:
 			if b.inFrame && len(b.frameBuffer) > 0 {
-				frames = append(frames, append([]byte(nil), b.frameBuffer...))
+				// Make a copy before clearing buffer
+				frameCopy := make([]byte, len(b.frameBuffer))
+				copy(frameCopy, b.frameBuffer)
+				frames = append(frames, frameCopy)
 				b.frameBuffer = b.frameBuffer[:0]
 			}
 			b.frameBuffer = append(b.frameBuffer, db)
 			b.inFrame = true
 		case ETX:
 			b.frameBuffer = append(b.frameBuffer, db)
-			frames = append(frames, append([]byte(nil), b.frameBuffer...))
+			// Make a copy before clearing buffer
+			frameCopy := make([]byte, len(b.frameBuffer))
+			copy(frameCopy, b.frameBuffer)
+			frames = append(frames, frameCopy)
 			b.frameBuffer = b.frameBuffer[:0]
 			b.inFrame = false
 		default:
 			if len(b.frameBuffer) >= MaxFrameBufferSize {
-				frames = append(frames, append([]byte(nil), b.frameBuffer...))
+				// Make a copy before clearing buffer
+				frameCopy := make([]byte, len(b.frameBuffer))
+				copy(frameCopy, b.frameBuffer)
+				frames = append(frames, frameCopy)
 				b.frameBuffer = b.frameBuffer[:0]
 				b.inFrame = false
 			}
@@ -289,6 +393,15 @@ func (b *Bridge) processSerialData(data []byte) [][]byte {
 func (b *Bridge) Disconnect() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	
+	// Signal stop to worker goroutines (only once)
+	select {
+	case <-b.stopChan:
+		// Already closed
+	default:
+		close(b.stopChan)
+	}
+	
 	if b.mqttClient != nil && b.mqttClient.IsConnected() {
 		statusTopic := fmt.Sprintf("bridges/%s/status", b.bridgeID)
 		offlinePayload, _ := json.Marshal(StatusUpdate{Status: "offline"})
