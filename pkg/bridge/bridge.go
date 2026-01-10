@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	STX                byte = 0x02
-	ETX                byte = 0x03
-	MaxFrameBufferSize      = 8192
-	DefaultBaudRate         = 9600
-	MQTTBroker              = "mqtts://broker.scorescrape.io:8883"
+	STX                     byte = 0x02
+	ETX                     byte = 0x03
+	MaxFrameBufferSize           = 8192
+	DefaultBaudRate              = 9600
+	MQTTBroker                   = "mqtts://broker.scorescrape.io:8883"
+	DataActivityTimeout          = 5 * time.Second
 )
 
 // Message structures for MQTT communication
@@ -141,20 +142,138 @@ type Bridge struct {
 	currentPortName  string
 	stopChan         chan struct{}
 	publishQueue     chan []byte
+	
+	// Data activity monitoring fields
+	dataActivityTimer    *time.Timer
+	currentStatus       string
+	statusMutex         sync.RWMutex
+	dataTimeoutDuration time.Duration
+	dataActivityStopChan chan struct{}
 }
 
 func New(bridgeID string) *Bridge {
 	return &Bridge{
-		bridgeID:     bridgeID,
-		dataTopic:    fmt.Sprintf("bridges/%s/data", bridgeID),
-		frameBuffer:  make([]byte, 0, 1024),
-		lastDataTime: time.Now().UnixNano(),
-		stopChan:     make(chan struct{}),
-		publishQueue: make(chan []byte, 100), // Buffer up to 100 frames
+		bridgeID:            bridgeID,
+		dataTopic:           fmt.Sprintf("bridges/%s/data", bridgeID),
+		frameBuffer:         make([]byte, 0, 1024),
+		lastDataTime:        time.Now().UnixNano(),
+		stopChan:            make(chan struct{}),
+		publishQueue:        make(chan []byte, 100), // Buffer up to 100 frames
+		currentStatus:       "offline",
+		dataTimeoutDuration: DataActivityTimeout,
+		dataActivityStopChan: make(chan struct{}),
 	}
 }
 
 func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = h }
+
+// updateStatus updates the bridge status with proper retention control
+func (b *Bridge) updateStatus(status string, retained bool) error {
+	b.statusMutex.Lock()
+	defer b.statusMutex.Unlock()
+	
+	// Don't update if status hasn't changed
+	if b.currentStatus == status {
+		return nil
+	}
+	
+	b.currentStatus = status
+	
+	// Publish status update to MQTT
+	b.mu.RLock()
+	mqtt := b.mqttClient
+	bridgeID := b.bridgeID
+	b.mu.RUnlock()
+	
+	if mqtt != nil && mqtt.IsConnected() {
+		statusTopic := fmt.Sprintf("bridges/%s/status", bridgeID)
+		statusPayload, _ := json.Marshal(StatusUpdate{Status: status})
+		
+		if retained {
+			return mqtt.PublishRetained(statusTopic, statusPayload)
+		} else {
+			return mqtt.PublishSync(statusTopic, statusPayload)
+		}
+	}
+	
+	return nil
+}
+
+// getCurrentStatus returns the current bridge status thread-safely
+func (b *Bridge) getCurrentStatus() string {
+	b.statusMutex.RLock()
+	defer b.statusMutex.RUnlock()
+	return b.currentStatus
+}
+
+// resetDataActivityTimer resets the data activity timer
+func (b *Bridge) resetDataActivityTimer() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	// Stop existing timer if it exists
+	if b.dataActivityTimer != nil {
+		if !b.dataActivityTimer.Stop() {
+			// Timer already fired, drain the channel if needed
+			select {
+			case <-b.dataActivityTimer.C:
+			default:
+			}
+		}
+	}
+	
+	// Create new timer that will trigger status change to "waiting"
+	b.dataActivityTimer = time.AfterFunc(b.dataTimeoutDuration, func() {
+		// Recover from any panics in timer callback
+		defer func() {
+			if r := recover(); r != nil {
+				// Log error but continue operation
+				// In a real implementation, you'd use a proper logger
+				fmt.Printf("Data activity timer panic recovered: %v\n", r)
+			}
+		}()
+		
+		// Only transition to waiting if currently online
+		if b.getCurrentStatus() == "online" {
+			if err := b.updateStatus("waiting", false); err != nil {
+				// Log error but continue operation
+				fmt.Printf("Failed to update status to waiting: %v\n", err)
+			}
+		}
+	})
+}
+
+// stopDataActivityTimer stops the data activity timer
+func (b *Bridge) stopDataActivityTimer() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	if b.dataActivityTimer != nil {
+		b.dataActivityTimer.Stop()
+		b.dataActivityTimer = nil
+	}
+}
+
+// onDataReceived handles data reception for activity monitoring
+func (b *Bridge) onDataReceived() {
+	// Recover from any panics
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Data reception handler panic recovered: %v\n", r)
+		}
+	}()
+	
+	// If we were waiting, transition back to online
+	if b.getCurrentStatus() == "waiting" {
+		if err := b.updateStatus("online", true); err != nil {
+			// Log error but continue operation
+			fmt.Printf("Failed to update status to online: %v\n", err)
+		}
+	}
+	
+	// Reset the activity timer
+	b.resetDataActivityTimer()
+}
 
 func (b *Bridge) Connect(portName string, baudRate int) error {
 	b.mu.Lock()
@@ -164,10 +283,14 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 		// Channel was closed, recreate it
 		b.stopChan = make(chan struct{})
 		b.publishQueue = make(chan []byte, 100)
+		b.dataActivityStopChan = make(chan struct{})
 	default:
 		// Channel is still open, check if publishQueue needs recreation
 		if b.publishQueue == nil {
 			b.publishQueue = make(chan []byte, 100)
+		}
+		if b.dataActivityStopChan == nil {
+			b.dataActivityStopChan = make(chan struct{})
 		}
 	}
 	b.mu.Unlock()
@@ -208,6 +331,9 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 
 	onlinePayload, _ := json.Marshal(StatusUpdate{Status: "online"})
 	m.PublishRetained(statusTopic, onlinePayload)
+	
+	// Initialize status for data activity monitoring
+	b.updateStatus("online", true)
 
 	return nil
 }
@@ -220,6 +346,9 @@ func (b *Bridge) reconnectWithBaudRate(baud int) error {
 		return nil
 	}
 
+	// Stop data activity timer during reconnection
+	b.stopDataActivityTimer()
+
 	b.serialPort.Close()
 	port, err := OpenSerialPort(b.currentPortName, baud)
 	if err != nil {
@@ -227,10 +356,17 @@ func (b *Bridge) reconnectWithBaudRate(baud int) error {
 	}
 	b.serialPort = port
 	b.currentBaudRate = baud
+	
+	// Reset data activity monitoring after reconnection
+	b.resetDataActivityTimer()
+	
 	return nil
 }
 
 func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
+	// Initialize data activity monitoring
+	b.resetDataActivityTimer()
+	
 	// Start async publisher goroutine
 	go b.publishWorker()
 
@@ -308,6 +444,9 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 			b.mu.Lock()
 			b.lastDataTime = now
 			b.mu.Unlock()
+
+			// Trigger data activity monitoring
+			b.onDataReceived()
 
 			if onData != nil {
 				onData(data)
@@ -394,6 +533,9 @@ func (b *Bridge) Disconnect() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Stop data activity monitoring
+	b.stopDataActivityTimer()
+
 	// Signal stop to worker goroutines (only once)
 	select {
 	case <-b.stopChan:
@@ -411,6 +553,12 @@ func (b *Bridge) Disconnect() error {
 	if b.serialPort != nil {
 		b.serialPort.Close()
 	}
+	
+	// Update internal status
+	b.statusMutex.Lock()
+	b.currentStatus = "offline"
+	b.statusMutex.Unlock()
+	
 	return nil
 }
 

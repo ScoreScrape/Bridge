@@ -7,9 +7,12 @@
 # Build output
 dist/
 build/
+/bridge
+Dockerfile.windows-builder
 
 # IDE
 .vscode/
+.kiro/
 !.vscode/settings.json
 .idea/
 *.swp
@@ -29,16 +32,9 @@ fyne_metadata_init.go
 # Local Docker Build
 *.env
 
-# Build Output
-/bridge
-*.app
-/bridge
-^bridge$
-
 # Dev Recordings
 recordings/
 
-# Internal Dev Build Scripts
-*.sh
-
+# Not ready for release yet!
 TEMP-README.md
+build.sh
