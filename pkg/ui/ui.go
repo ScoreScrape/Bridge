@@ -46,8 +46,10 @@ type App struct {
 	portLabel     *widget.Label
 	portContainer *fyne.Container
 	state         ConnectionState
+	stateMutex    sync.Mutex
 	rxTimer       *time.Timer
 	rxTimerMutex  sync.Mutex
+	connecting    bool // Prevents double-click issues
 }
 
 func NewApp() *App {
@@ -136,15 +138,34 @@ func (a *App) buildUI() {
 	a.window.SetContent(a.leftContent)
 }
 
+func (a *App) getState() ConnectionState {
+	a.stateMutex.Lock()
+	defer a.stateMutex.Unlock()
+	return a.state
+}
+
 func (a *App) updateState(s ConnectionState) {
-	colors := map[ConnectionState]color.Color{StateDisconnected: color.RGBA{100, 100, 100, 255}, StateConnected: color.RGBA{34, 197, 94, 255}, StateError: color.RGBA{239, 68, 68, 255}, StateConnecting: color.RGBA{103, 103, 228, 255}}
-	texts := map[ConnectionState]string{StateDisconnected: "DISCONNECTED", StateConnected: "CONNECTED", StateError: "ERROR", StateConnecting: "CONNECTING"}
+	a.stateMutex.Lock()
+	a.state = s
+	a.stateMutex.Unlock()
+
+	colors := map[ConnectionState]color.Color{
+		StateDisconnected: color.RGBA{100, 100, 100, 255},
+		StateConnected:    color.RGBA{34, 197, 94, 255},
+		StateError:        color.RGBA{239, 68, 68, 255},
+		StateConnecting:   color.RGBA{103, 103, 228, 255},
+	}
+	texts := map[ConnectionState]string{
+		StateDisconnected: "DISCONNECTED",
+		StateConnected:    "CONNECTED",
+		StateError:        "ERROR",
+		StateConnecting:   "CONNECTING",
+	}
 
 	// Batch UI updates to avoid multiple refreshes
 	a.statusDot.FillColor = colors[s]
 	a.statusLabel.Text = texts[s]
 	a.statusLabel.Color = colors[s]
-	a.state = s
 
 	// Single refresh call for better performance
 	a.statusDot.Refresh()
@@ -156,8 +177,11 @@ func (a *App) updateButtonState() {
 	if a.connectBtn == nil {
 		return
 	}
+
+	state := a.getState()
+
 	// Fyne widgets are thread-safe, can update directly
-	if a.state == StateConnected || a.state == StateConnecting {
+	if state == StateConnected || state == StateConnecting {
 		a.connectBtn.SetText("Disconnect Bridge")
 		a.connectBtn.SetIcon(theme.LogoutIcon())
 		// Low importance for disconnect action (grey color)
@@ -188,19 +212,47 @@ func (a *App) loadPreferences() {
 }
 
 func (a *App) toggleConnection() {
-	if a.state == StateConnected || a.state == StateConnecting {
-		if a.bridge != nil {
-			a.bridge.Disconnect()
-		}
-		a.resetRxIndicator()
-		a.updateState(StateDisconnected)
-	} else {
-		go a.connectAndRun(a.bridgeIDEntry.Text, a.portSelect.Selected)
+	a.stateMutex.Lock()
+	currentState := a.state
+
+	// If we're connected/connecting, allow disconnect regardless of connecting flag
+	if currentState == StateConnected || currentState == StateConnecting {
+		a.stateMutex.Unlock()
+		// Disconnect in background to avoid blocking UI
+		go func() {
+			if a.bridge != nil {
+				a.bridge.Disconnect()
+				a.bridge = nil
+			}
+			a.resetRxIndicator()
+			a.stateMutex.Lock()
+			a.connecting = false
+			a.stateMutex.Unlock()
+			a.updateState(StateDisconnected)
+		}()
+		return
 	}
+
+	// Prevent double-clicking connect
+	if a.connecting {
+		a.stateMutex.Unlock()
+		return
+	}
+	a.connecting = true
+	a.stateMutex.Unlock()
+
+	go func() {
+		a.connectAndRun(a.bridgeIDEntry.Text, a.portSelect.Selected)
+		// Note: connecting flag is cleared when Start() returns or on error
+	}()
 }
 
 func (a *App) connectAndRun(id, port string) {
 	if id == "" || port == "" {
+		a.stateMutex.Lock()
+		a.connecting = false
+		a.stateMutex.Unlock()
+		a.updateState(StateError)
 		return
 	}
 	a.fyneApp.Preferences().SetString("bridge_id", id)
@@ -215,10 +267,17 @@ func (a *App) connectAndRun(id, port string) {
 	})
 
 	if err := a.bridge.Connect(port, 9600); err != nil {
+		a.stateMutex.Lock()
+		a.connecting = false
+		a.stateMutex.Unlock()
 		a.updateState(StateError)
 		return
 	}
 
+	// Connection established - clear connecting flag before blocking on Start()
+	a.stateMutex.Lock()
+	a.connecting = false
+	a.stateMutex.Unlock()
 	a.updateState(StateConnected)
 
 	err := a.bridge.Start(func(d []byte) {
@@ -227,18 +286,18 @@ func (a *App) connectAndRun(id, port string) {
 		// Logging disabled - app is simplified to just send data
 	})
 
-	if err != nil && a.state == StateConnected {
+	if err != nil && a.getState() == StateConnected {
 		a.updateState(StateError)
 		a.reconnect(id, port)
 	}
 }
 
 func (a *App) reconnect(id, port string) {
-	if a.state != StateError {
+	if a.getState() != StateError {
 		return
 	}
 	time.Sleep(2 * time.Second)
-	if a.state == StateError {
+	if a.getState() == StateError {
 		go a.connectAndRun(id, port)
 	}
 }
@@ -284,7 +343,7 @@ func (a *App) resetRxIndicator() {
 	a.rxIndicator.Refresh()
 }
 
-// ShadcnTheme implementation
+// shadcn theme
 type ShadcnTheme struct{}
 
 func (t *ShadcnTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {

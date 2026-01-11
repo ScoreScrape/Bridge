@@ -6,59 +6,77 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Reduce redundancy and improve caching
+env:
+  GO_VERSION: '1.21'
+  FYNE_VERSION: 'v2.7.2'
+
 jobs:
   build:
     strategy:
+      # Fail-fast set to false to allow other builds to continue if one fails
+      fail-fast: false
       matrix:
         include:
           - os: windows
             arch: amd64
             ext: .exe
             gui_ext: .exe
-            target: windows
+            runs-on: windows-latest
           - os: darwin
             arch: amd64
             ext: ''
             gui_ext: .app
-            target: darwin
+            runs-on: macos-latest
           - os: darwin
             arch: arm64
             ext: ''
             gui_ext: .app
-            target: darwin
+            runs-on: macos-latest
           - os: linux
             arch: amd64
             ext: ''
             gui_ext: ''
-            target: linux
+            runs-on: ubuntu-latest
           - os: linux
             arch: arm64
             ext: ''
             gui_ext: ''
-            target: linux
+            runs-on: ubuntu-latest
 
-    runs-on: ${{ matrix.os == 'windows' && 'windows-latest' || matrix.os == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runs-on }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
+      - name: Install Fyne CLI
+        run: |
+          go install fyne.io/tools/cmd/fyne@${{ env.FYNE_VERSION }}
+          go get -u fyne.io/fyne/v2@${{ env.FYNE_VERSION }}
+
+      # Improved version reading
       - name: Read version
         id: version
+        shell: bash
         run: |
-          if [ -n "${{ github.ref }}" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          else
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+          VERSION=${VERSION#v}
+          if [ -z "$VERSION" ]; then
             VERSION=$(cat VERSION | tr -d '[:space:]')
           fi
+          echo "Detected version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
 
+      # Separate CLI and GUI build steps for clarity
       - name: Build CLI binary
         env:
           GOOS: ${{ matrix.os }}
@@ -66,18 +84,21 @@ jobs:
           CGO_ENABLED: 0
         run: |
           OUTPUT="bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
-          go build -ldflags="-w -s" -o "$OUTPUT" ./cmd/bridge
-          echo "binary=$OUTPUT" >> $GITHUB_OUTPUT
+          go build -ldflags="-w -s -X main.Version=${{ steps.version.outputs.version }}" \
+            -o "$OUTPUT" ./cmd/bridge
+          echo "CLI binary created: $OUTPUT"
 
       - name: Build GUI application
+        # Only build GUI for macOS and Windows
         if: matrix.os != 'linux'
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          go install fyne.io/tools/cmd/fyne@latest
+          # Ensure Fyne CLI is in PATH
           export PATH="$PATH:$(go env GOPATH)/bin"
           
+          # Platform-specific build commands
           if [ "${{ matrix.os }}" == "windows" ]; then
             fyne package --target windows \
               --app-id "io.scorescrape.bridge" \
@@ -101,10 +122,11 @@ jobs:
             ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
           fi
 
+      # Artifact upload steps
       - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          name: bridge-${{ matrix.os }}-${{ matrix.arch }}
           path: bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
           retention-days: 30
 
@@ -122,6 +144,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # Only create release for tagged versions
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -132,47 +155,40 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get version
-        id: version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f -name "bridge-*" -exec cp {} release-assets/ \;
-          find artifacts -type f -name "ScoreScrape-Bridge-*" -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name "bridge-*" -o -name "ScoreScrape-Bridge-*" \) -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
       - name: Generate release notes
         id: notes
         run: |
-          VERSION=${{ steps.version.outputs.version }}
+          VERSION=${GITHUB_REF#refs/tags/v}
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           
+          # Limit to last 6 commits, format nicely
           if [ -z "$PREV_TAG" ]; then
-            COMMITS=$(git log --pretty=format:"%s" --no-merges -6)
+            COMMITS=$(git log --pretty=format:"- %s (%an)" --no-merges -6)
           else
-            COMMITS=$(git log --pretty=format:"%s" --no-merges ${PREV_TAG}..HEAD)
+            COMMITS=$(git log --pretty=format:"- %s (%an)" --no-merges ${PREV_TAG}..HEAD)
           fi
           
-          if [ -z "$COMMITS" ]; then
-            CHANGES=""
-          else
-            CHANGES=$(echo "$COMMITS" | head -6 | while read line; do echo "  - $line"; done)
-          fi
-          
-          NOTES="Release $VERSION
+          NOTES="## ScoreScrape Bridge $VERSION
 
-          Binaries for macOS (Intel and Apple Silicon), Windows, and Linux.
+          ### Binaries
+          - Windows (64-bit)
+          - macOS Intel (64-bit)
+          - macOS Apple Silicon (ARM64)
 
-          $CHANGES"
+          ### Changes
+          $COMMITS"
           
           echo "$NOTES" > release-notes.md
           cat release-notes.md
@@ -181,8 +197,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: release-assets/*
-          body_path: release-notes.md
+          body_file: release-notes.md
           draft: false
           prerelease: false
-          tag_name: ${{ github.ref_name }}
-

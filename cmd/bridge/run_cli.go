@@ -15,10 +15,11 @@ func runCLI() {
 		log.Fatal("BRIDGE_ID environment variable is required for CLI mode")
 	}
 
-	// Hardcoded expected device path
+	// Docker default device
 	serialPort := "/dev/ttyUSB0"
 
-	// Check if serial port exists
+	// Check if it exists, if not give the user a semi-helpful error message
+	// TODO: probably come back and re-word this, im not sure it it's 100% clear to non-technical users..
 	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
 		log.Printf(`
 Oops! Looks like the serial port is not configured correctly.

@@ -18,7 +18,7 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# build the binary (CLI mode, no GUI - default build excludes gui tag)
+# build the binary (Docker mode, no GUI - default build excludes gui tag)
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} \
     go build -ldflags="-w -s" -o /bridge ./cmd/bridge
 
