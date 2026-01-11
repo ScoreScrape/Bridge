@@ -20,29 +20,13 @@ jobs:
         include:
           - os: windows
             arch: amd64
-            ext: .exe
-            gui_ext: .exe
             runs-on: windows-latest
           - os: darwin
             arch: amd64
-            ext: ''
-            gui_ext: .app
             runs-on: macos-latest
           - os: darwin
             arch: arm64
-            ext: ''
-            gui_ext: .app
             runs-on: macos-latest
-          - os: linux
-            arch: amd64
-            ext: ''
-            gui_ext: ''
-            runs-on: ubuntu-latest
-          - os: linux
-            arch: arm64
-            ext: ''
-            gui_ext: ''
-            runs-on: ubuntu-latest
 
     runs-on: ${{ matrix.runs-on }}
 
@@ -81,22 +65,7 @@ jobs:
           echo "Detected version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # Separate CLI and GUI build steps for clarity
-      - name: Build CLI binary
-        shell: bash
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 0
-        run: |
-          OUTPUT="bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
-          go build -ldflags="-w -s -X main.Version=${{ steps.version.outputs.version }}" \
-            -o "$OUTPUT" ./cmd/bridge
-          echo "CLI binary created: $OUTPUT"
-
       - name: Build GUI application
-        # Only build GUI for macOS and Windows
-        if: matrix.os != 'linux'
         shell: bash
         env:
           GOOS: ${{ matrix.os }}
@@ -165,16 +134,8 @@ jobs:
             fi
           fi
 
-      # Artifact upload steps
-      - name: Upload CLI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bridge-${{ matrix.os }}-${{ matrix.arch }}
-          path: bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
-          retention-days: 30
-
+      # Artifact upload step
       - name: Upload GUI artifact
-        if: matrix.os != 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: gui-${{ matrix.os }}-${{ matrix.arch }}
@@ -207,7 +168,9 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "bridge-*" -o -name "ScoreScrape-Bridge-*" \) -exec cp {} release-assets/ \;
+          find artifacts -type f -name "ScoreScrape-Bridge-*" -exec cp {} release-assets/ \;
+          # Also copy .app directories
+          find artifacts -type d -name "*.app" -exec cp -r {} release-assets/ \;
           ls -lh release-assets/
 
       - name: Generate release notes
@@ -225,10 +188,10 @@ jobs:
           
           NOTES="## ScoreScrape Bridge $VERSION
 
-          ### Binaries
-          - Windows (64-bit)
-          - macOS Intel (64-bit)
-          - macOS Apple Silicon (ARM64)
+          ### Downloads
+          - Windows (64-bit) - .exe
+          - macOS Intel (64-bit) - .app
+          - macOS Apple Silicon (ARM64) - .app
 
           ### Changes
           $COMMITS"
