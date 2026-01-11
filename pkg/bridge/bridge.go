@@ -19,6 +19,7 @@ const (
 	DefaultBaudRate          = 9600
 	MQTTBroker               = "mqtts://broker.scorescrape.io:8883"
 	DataActivityTimeout      = 5 * time.Second
+	SerialReadTimeout        = 100 * time.Millisecond
 )
 
 // Message structures for MQTT communication
@@ -41,6 +42,12 @@ func OpenSerialPort(portName string, baudRate int) (*SerialPort, error) {
 	port, err := serial.Open(portName, mode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open serial port: %w", err)
+	}
+	// Set read timeout to prevent blocking forever on Windows
+	// This is critical - without a timeout, Read() can hang indefinitely on Windows
+	if err := port.SetReadTimeout(SerialReadTimeout); err != nil {
+		port.Close()
+		return nil, fmt.Errorf("failed to set read timeout: %w", err)
 	}
 	return &SerialPort{port: port, reader: bufio.NewReader(port)}, nil
 }
@@ -146,7 +153,7 @@ type Bridge struct {
 	// Data activity monitoring fields
 	dataActivityTimer    *time.Timer
 	currentStatus        string
-	statusMutex          sync.RWMutex
+	statusMutex          sync.Mutex // Changed from RWMutex for simplicity
 	dataTimeoutDuration  time.Duration
 	dataActivityStopChan chan struct{}
 }
@@ -168,23 +175,25 @@ func New(bridgeID string) *Bridge {
 func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = h }
 
 // updateStatus updates the bridge status with proper retention control
+// LOCK ORDER: Always acquire mu.RLock BEFORE statusMutex to prevent deadlock with Disconnect()
 func (b *Bridge) updateStatus(status string, retained bool) error {
-	b.statusMutex.Lock()
-	defer b.statusMutex.Unlock()
-
-	// Don't update if status hasn't changed
-	if b.currentStatus == status {
-		return nil
-	}
-
-	b.currentStatus = status
-
-	// Publish status update to MQTT
+	// First, get MQTT client reference with mu lock
 	b.mu.RLock()
 	mqtt := b.mqttClient
 	bridgeID := b.bridgeID
 	b.mu.RUnlock()
 
+	// Then update status with statusMutex
+	b.statusMutex.Lock()
+	// Don't update if status hasn't changed
+	if b.currentStatus == status {
+		b.statusMutex.Unlock()
+		return nil
+	}
+	b.currentStatus = status
+	b.statusMutex.Unlock()
+
+	// Publish status update to MQTT (outside of lock)
 	if mqtt != nil && mqtt.IsConnected() {
 		statusTopic := fmt.Sprintf("bridges/%s/status", bridgeID)
 		statusPayload, _ := json.Marshal(StatusUpdate{Status: status})
@@ -201,8 +210,8 @@ func (b *Bridge) updateStatus(status string, retained bool) error {
 
 // getCurrentStatus returns the current bridge status thread-safely
 func (b *Bridge) getCurrentStatus() string {
-	b.statusMutex.RLock()
-	defer b.statusMutex.RUnlock()
+	b.statusMutex.Lock()
+	defer b.statusMutex.Unlock()
 	return b.currentStatus
 }
 
@@ -228,7 +237,6 @@ func (b *Bridge) resetDataActivityTimer() {
 		defer func() {
 			if r := recover(); r != nil {
 				// Log error but continue operation
-				// In a real implementation, you'd use a proper logger
 				fmt.Printf("Data activity timer panic recovered: %v\n", r)
 			}
 		}()
@@ -244,10 +252,8 @@ func (b *Bridge) resetDataActivityTimer() {
 }
 
 // stopDataActivityTimer stops the data activity timer
-func (b *Bridge) stopDataActivityTimer() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
+// MUST be called with b.mu already locked
+func (b *Bridge) stopDataActivityTimerLocked() {
 	if b.dataActivityTimer != nil {
 		b.dataActivityTimer.Stop()
 		b.dataActivityTimer = nil
@@ -277,6 +283,8 @@ func (b *Bridge) onDataReceived() {
 
 func (b *Bridge) Connect(portName string, baudRate int) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	// Recreate channels if they were closed (e.g., after Disconnect)
 	select {
 	case <-b.stopChan:
@@ -293,10 +301,6 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 			b.dataActivityStopChan = make(chan struct{})
 		}
 	}
-	b.mu.Unlock()
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	if baudRate == 0 {
 		baudRate = DefaultBaudRate
@@ -318,6 +322,7 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 	m.onConnectionLost = b.onConnectionLost
 	if err := m.Connect(); err != nil {
 		b.serialPort.Close()
+		b.serialPort = nil
 		return err
 	}
 	b.mqttClient = m
@@ -332,8 +337,10 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 	onlinePayload, _ := json.Marshal(StatusUpdate{Status: "online"})
 	m.PublishRetained(statusTopic, onlinePayload)
 
-	// Initialize status for data activity monitoring
-	b.updateStatus("online", true)
+	// Initialize status for data activity monitoring (update without lock since we hold mu)
+	b.statusMutex.Lock()
+	b.currentStatus = "online"
+	b.statusMutex.Unlock()
 
 	return nil
 }
@@ -347,7 +354,7 @@ func (b *Bridge) reconnectWithBaudRate(baud int) error {
 	}
 
 	// Stop data activity timer during reconnection
-	b.stopDataActivityTimer()
+	b.stopDataActivityTimerLocked()
 
 	b.serialPort.Close()
 	port, err := OpenSerialPort(b.currentPortName, baud)
@@ -356,9 +363,6 @@ func (b *Bridge) reconnectWithBaudRate(baud int) error {
 	}
 	b.serialPort = port
 	b.currentBaudRate = baud
-
-	// Reset data activity monitoring after reconnection
-	b.resetDataActivityTimer()
 
 	return nil
 }
@@ -424,12 +428,13 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 
 		n, err := port.Read(buf)
 		if err != nil {
-			// Serial read error - check if we should stop or retry
+			// Check if it's a timeout (expected on Windows with read timeout set)
+			// Timeouts return 0 bytes read, which we handle below
 			select {
 			case <-b.stopChan:
 				return nil
 			default:
-				// Retry after delay
+				// Brief sleep to prevent tight loop on errors
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
@@ -463,7 +468,6 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 						return nil
 					default:
 						// Queue full, drop frame (or could log warning)
-						// In production, you might want to use a larger buffer or handle this differently
 					}
 				}
 			}
@@ -533,8 +537,8 @@ func (b *Bridge) Disconnect() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Stop data activity monitoring
-	b.stopDataActivityTimer()
+	// Stop data activity monitoring (using locked version since we hold mu)
+	b.stopDataActivityTimerLocked()
 
 	// Signal stop to worker goroutines (only once)
 	select {
@@ -552,9 +556,10 @@ func (b *Bridge) Disconnect() error {
 	}
 	if b.serialPort != nil {
 		b.serialPort.Close()
+		b.serialPort = nil
 	}
 
-	// Update internal status
+	// Update internal status (acquire statusMutex while holding mu - same order as everywhere)
 	b.statusMutex.Lock()
 	b.currentStatus = "offline"
 	b.statusMutex.Unlock()
