@@ -42,20 +42,20 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 	})
 
 	// Enhanced reconnection logic with circuit breaker
-	reconnectDelay := 5 * time.Second // Start with longer initial delay
+	reconnectDelay := 5 * time.Second    // Start with longer initial delay
 	maxReconnectDelay := 5 * time.Minute // Increase max delay significantly
 	minReconnectDelay := 5 * time.Second
 	consecutiveFailures := 0
-	maxConsecutiveFailures := 10 // Circuit breaker threshold
+	maxConsecutiveFailures := 10            // Circuit breaker threshold
 	circuitBreakerDelay := 15 * time.Minute // Long delay when circuit is open
 	lastSuccessTime := time.Now()
 
 	for {
 		// Circuit breaker: if too many consecutive failures, wait longer
 		if consecutiveFailures >= maxConsecutiveFailures {
-			log.Printf("Circuit breaker activated after %d consecutive failures. Waiting %v before retry...", 
+			log.Printf("Circuit breaker activated after %d consecutive failures. Waiting %v before retry...",
 				consecutiveFailures, circuitBreakerDelay)
-			
+
 			select {
 			case <-sigChan:
 				log.Println("Shutdown signal received")
@@ -67,13 +67,13 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 			}
 		}
 
-		log.Printf("Connecting to serial port %s (bridge ID: %s)... (attempt %d)", 
+		log.Printf("Connecting to serial port %s (bridge ID: %s)... (attempt %d)",
 			serialPort, bridgeID, consecutiveFailures+1)
 
 		if err := b.Connect(serialPort, bridge.DefaultBaudRate); err != nil {
 			consecutiveFailures++
 			log.Printf("Connection failed: %v (failure %d/%d)", err, consecutiveFailures, maxConsecutiveFailures)
-			
+
 			// Don't log retry message if circuit breaker will activate
 			if consecutiveFailures < maxConsecutiveFailures {
 				log.Printf("Retrying in %v...", reconnectDelay)
@@ -102,7 +102,7 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 		errChan := make(chan error, 1)
 		healthCheckTicker := time.NewTicker(30 * time.Second)
 		defer healthCheckTicker.Stop()
-		
+
 		go func() {
 			err := b.Start(nil, func(msg string) {
 				log.Println(msg)
@@ -124,17 +124,17 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 				return
 			case err := <-errChan:
 				connectionDuration := time.Since(lastSuccessTime)
-				
+
 				if err != nil {
 					log.Printf("Bridge error after %v: %v", connectionDuration, err)
 				}
-				
+
 				b.Disconnect()
-				
+
 				// If connection was very short-lived, treat as failure
 				if connectionDuration < 30*time.Second {
 					consecutiveFailures++
-					log.Printf("Short-lived connection detected (%v), treating as failure %d/%d", 
+					log.Printf("Short-lived connection detected (%v), treating as failure %d/%d",
 						connectionDuration, consecutiveFailures, maxConsecutiveFailures)
 				} else {
 					// Connection lasted reasonable time, reset some failure tracking
@@ -142,13 +142,13 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 						consecutiveFailures = max(0, consecutiveFailures-1)
 					}
 				}
-				
+
 				// Add minimum delay before reconnection to prevent tight loops
 				minWait := 2 * time.Second
 				if consecutiveFailures > 3 {
 					minWait = 10 * time.Second
 				}
-				
+
 				log.Printf("Waiting %v before reconnection attempt...", minWait)
 				select {
 				case <-sigChan:
@@ -163,11 +163,11 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 				if !b.IsHealthy() {
 					healthCheckFailures++
 					log.Printf("Health check failed (%d/%d)", healthCheckFailures, maxHealthCheckFailures)
-					
+
 					if healthCheckFailures >= maxHealthCheckFailures {
 						log.Printf("Device appears to be in unrecoverable state after %d failed health checks", healthCheckFailures)
 						b.Disconnect()
-						
+
 						// Force a longer delay and reset to try recovery
 						consecutiveFailures = maxConsecutiveFailures - 1 // Trigger near-circuit-breaker behavior
 						goto reconnectLoop
@@ -181,8 +181,8 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 				}
 			}
 		}
-		
-		reconnectLoop:
+
+	reconnectLoop:
 		// Continue to outer loop for reconnection
 	}
 }

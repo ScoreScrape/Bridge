@@ -92,17 +92,17 @@ func isUnusablePort(name string) bool {
 func getAppVersion() string {
 	// Try multiple possible locations for the VERSION file
 	possiblePaths := []string{
-		"VERSION",           // Current directory
-		"../VERSION",        // Parent directory (if running from cmd/bridge)
-		"../../VERSION",     // Two levels up (if running from nested build dir)
+		"VERSION",       // Current directory
+		"../VERSION",    // Parent directory (if running from cmd/bridge)
+		"../../VERSION", // Two levels up (if running from nested build dir)
 	}
-	
+
 	for _, path := range possiblePaths {
 		if data, err := ioutil.ReadFile(path); err == nil {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	
+
 	// Fallback version if file not found
 	return "unknown"
 }
@@ -135,24 +135,24 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		SetConnectTimeout(30 * time.Second).       // Add connect timeout
 		SetWriteTimeout(10 * time.Second).         // Add write timeout
 		SetMessageChannelDepth(1000)               // Increase message buffer
-	
+
 	if lwtTopic != "" && lwtPayload != nil {
 		opts.SetWill(lwtTopic, string(lwtPayload), 0, true)
 	}
-	
+
 	m := &MQTTClient{}
 	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
 		if m.onConnectionLost != nil {
 			m.onConnectionLost(err)
 		}
 	})
-	
+
 	// Add reconnect handler to log reconnection attempts
 	opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
 		// This helps us track when MQTT is trying to reconnect
 		// Could add logging here if needed
 	})
-	
+
 	m.client = mqtt.NewClient(opts)
 	return m
 }
@@ -214,7 +214,7 @@ type Bridge struct {
 	statusMutex          sync.Mutex // Changed from RWMutex for simplicity
 	dataTimeoutDuration  time.Duration
 	dataActivityStopChan chan struct{}
-	
+
 	// Health monitoring fields
 	lastHealthyTime      time.Time
 	healthCheckInterval  time.Duration
@@ -244,17 +244,17 @@ func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = 
 func (b *Bridge) IsHealthy() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	// Check if we have both serial and MQTT connections
 	if b.serialPort == nil || b.mqttClient == nil || !b.mqttClient.IsConnected() {
 		return false
 	}
-	
+
 	// Check if we've been unhealthy for too long
 	if time.Since(b.lastHealthyTime) > b.maxUnhealthyDuration {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -445,12 +445,12 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 // sendStartupInfo sends version and type information when first connecting to MQTT
 func (b *Bridge) sendStartupInfo(mqttClient *MQTTClient) {
 	statusTopic := fmt.Sprintf("bridges/%s/status", b.bridgeID)
-	
+
 	// Send version information
 	version := getAppVersion()
 	versionPayload, _ := json.Marshal(VersionMessage{Version: version})
 	mqttClient.Publish(statusTopic, versionPayload)
-	
+
 	// Send type information
 	appType := getAppType()
 	typePayload, _ := json.Marshal(TypeMessage{Type: appType})
@@ -525,7 +525,7 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 	buf := make([]byte, 1024)
 	consecutiveErrors := 0
 	maxConsecutiveErrors := 50 // Allow some errors before giving up
-	
+
 	for {
 		select {
 		case <-b.stopChan:
@@ -544,7 +544,7 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 		n, err := port.Read(buf)
 		if err != nil {
 			consecutiveErrors++
-			
+
 			// Check if it's a timeout (expected on Windows with read timeout set)
 			// Timeouts return 0 bytes read, which we handle below
 			select {
@@ -555,7 +555,7 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 				if consecutiveErrors > maxConsecutiveErrors {
 					return fmt.Errorf("too many consecutive read errors (%d), last error: %w", consecutiveErrors, err)
 				}
-				
+
 				// Progressive delay based on error count
 				var delay time.Duration
 				if consecutiveErrors < 10 {
@@ -565,7 +565,7 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 				} else {
 					delay = 500 * time.Millisecond
 				}
-				
+
 				time.Sleep(delay)
 				continue
 			}
