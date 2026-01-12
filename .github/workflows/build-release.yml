@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'Beta_v*'
   workflow_dispatch:
 
 # Reduce redundancy and improve caching
