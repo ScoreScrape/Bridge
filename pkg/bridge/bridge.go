@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,14 @@ type SettingsMessage struct {
 
 type StatusUpdate struct {
 	Status string `json:"status"`
+}
+
+type VersionMessage struct {
+	Version string `json:"version"`
+}
+
+type TypeMessage struct {
+	Type string `json:"type"`
 }
 
 // SerialPort handles the serial interface
@@ -78,6 +88,35 @@ func isUnusablePort(name string) bool {
 	return strings.Contains(low, "bluetooth") && !strings.Contains(low, "usb")
 }
 
+// getAppVersion reads the version from the VERSION file
+func getAppVersion() string {
+	// Try multiple possible locations for the VERSION file
+	possiblePaths := []string{
+		"VERSION",       // Current directory
+		"../VERSION",    // Parent directory (if running from cmd/bridge)
+		"../../VERSION", // Two levels up (if running from nested build dir)
+	}
+
+	for _, path := range possiblePaths {
+		if data, err := ioutil.ReadFile(path); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+
+	// Fallback version if file not found
+	return "unknown"
+}
+
+// getAppType determines if this is a Docker or Windows deployment
+func getAppType() string {
+	// Check if running in Docker environment (CLI only, no GUI)
+	if os.Getenv("BRIDGE_GUI") == "false" {
+		return "docker"
+	}
+	// Default to windows for GUI mode
+	return "windows"
+}
+
 // MQTTClient handles broker communication
 type MQTTClient struct {
 	client           mqtt.Client
@@ -85,16 +124,35 @@ type MQTTClient struct {
 }
 
 func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTClient {
-	opts := mqtt.NewClientOptions().AddBroker(broker).SetClientID(clientID).SetAutoReconnect(true).SetMaxReconnectInterval(10 * time.Second)
+	opts := mqtt.NewClientOptions().
+		AddBroker(broker).
+		SetClientID(clientID).
+		SetAutoReconnect(true).
+		SetMaxReconnectInterval(30 * time.Second). // Increased from 10s
+		SetConnectRetryInterval(5 * time.Second).  // Add initial retry interval
+		SetKeepAlive(60 * time.Second).            // Increase keep alive
+		SetPingTimeout(10 * time.Second).          // Increase ping timeout
+		SetConnectTimeout(30 * time.Second).       // Add connect timeout
+		SetWriteTimeout(10 * time.Second).         // Add write timeout
+		SetMessageChannelDepth(1000)               // Increase message buffer
+
 	if lwtTopic != "" && lwtPayload != nil {
 		opts.SetWill(lwtTopic, string(lwtPayload), 0, true)
 	}
+
 	m := &MQTTClient{}
 	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
 		if m.onConnectionLost != nil {
 			m.onConnectionLost(err)
 		}
 	})
+
+	// Add reconnect handler to log reconnection attempts
+	opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
+		// This helps us track when MQTT is trying to reconnect
+		// Could add logging here if needed
+	})
+
 	m.client = mqtt.NewClient(opts)
 	return m
 }
@@ -156,6 +214,11 @@ type Bridge struct {
 	statusMutex          sync.Mutex // Changed from RWMutex for simplicity
 	dataTimeoutDuration  time.Duration
 	dataActivityStopChan chan struct{}
+
+	// Health monitoring fields
+	lastHealthyTime      time.Time
+	healthCheckInterval  time.Duration
+	maxUnhealthyDuration time.Duration
 }
 
 func New(bridgeID string) *Bridge {
@@ -169,10 +232,38 @@ func New(bridgeID string) *Bridge {
 		currentStatus:        "offline",
 		dataTimeoutDuration:  DataActivityTimeout,
 		dataActivityStopChan: make(chan struct{}),
+		lastHealthyTime:      time.Now(),
+		healthCheckInterval:  30 * time.Second,
+		maxUnhealthyDuration: 5 * time.Minute,
 	}
 }
 
 func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = h }
+
+// IsHealthy checks if the bridge is in a healthy state
+func (b *Bridge) IsHealthy() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Check if we have both serial and MQTT connections
+	if b.serialPort == nil || b.mqttClient == nil || !b.mqttClient.IsConnected() {
+		return false
+	}
+
+	// Check if we've been unhealthy for too long
+	if time.Since(b.lastHealthyTime) > b.maxUnhealthyDuration {
+		return false
+	}
+
+	return true
+}
+
+// markHealthy updates the last healthy timestamp
+func (b *Bridge) markHealthy() {
+	b.mu.Lock()
+	b.lastHealthyTime = time.Now()
+	b.mu.Unlock()
+}
 
 // updateStatus updates the bridge status with proper retention control
 // LOCK ORDER: Always acquire mu.RLock BEFORE statusMutex to prevent deadlock with Disconnect()
@@ -269,6 +360,9 @@ func (b *Bridge) onDataReceived() {
 		}
 	}()
 
+	// Mark bridge as healthy when receiving data
+	b.markHealthy()
+
 	// If we were waiting, transition back to online
 	if b.getCurrentStatus() == "waiting" {
 		if err := b.updateStatus("online", true); err != nil {
@@ -337,12 +431,30 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 	onlinePayload, _ := json.Marshal(StatusUpdate{Status: "online"})
 	m.PublishRetained(statusTopic, onlinePayload)
 
+	// Send version and type information on first connection
+	b.sendStartupInfo(m)
+
 	// Initialize status for data activity monitoring (update without lock since we hold mu)
 	b.statusMutex.Lock()
 	b.currentStatus = "online"
 	b.statusMutex.Unlock()
 
 	return nil
+}
+
+// sendStartupInfo sends version and type information when first connecting to MQTT
+func (b *Bridge) sendStartupInfo(mqttClient *MQTTClient) {
+	statusTopic := fmt.Sprintf("bridges/%s/status", b.bridgeID)
+
+	// Send version information
+	version := getAppVersion()
+	versionPayload, _ := json.Marshal(VersionMessage{Version: version})
+	mqttClient.Publish(statusTopic, versionPayload)
+
+	// Send type information
+	appType := getAppType()
+	typePayload, _ := json.Marshal(TypeMessage{Type: appType})
+	mqttClient.Publish(statusTopic, typePayload)
 }
 
 func (b *Bridge) reconnectWithBaudRate(baud int) error {
@@ -411,6 +523,9 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 	}()
 
 	buf := make([]byte, 1024)
+	consecutiveErrors := 0
+	maxConsecutiveErrors := 50 // Allow some errors before giving up
+
 	for {
 		select {
 		case <-b.stopChan:
@@ -428,16 +543,37 @@ func (b *Bridge) Start(onData func([]byte), onLog func(string)) error {
 
 		n, err := port.Read(buf)
 		if err != nil {
+			consecutiveErrors++
+
 			// Check if it's a timeout (expected on Windows with read timeout set)
 			// Timeouts return 0 bytes read, which we handle below
 			select {
 			case <-b.stopChan:
 				return nil
 			default:
-				// Brief sleep to prevent tight loop on errors
-				time.Sleep(10 * time.Millisecond)
+				// If we have too many consecutive errors, something is seriously wrong
+				if consecutiveErrors > maxConsecutiveErrors {
+					return fmt.Errorf("too many consecutive read errors (%d), last error: %w", consecutiveErrors, err)
+				}
+
+				// Progressive delay based on error count
+				var delay time.Duration
+				if consecutiveErrors < 10 {
+					delay = 10 * time.Millisecond
+				} else if consecutiveErrors < 25 {
+					delay = 100 * time.Millisecond
+				} else {
+					delay = 500 * time.Millisecond
+				}
+
+				time.Sleep(delay)
 				continue
 			}
+		}
+
+		// Reset error count on successful read (even if n=0 for timeout)
+		if err == nil {
+			consecutiveErrors = 0
 		}
 
 		if n > 0 {

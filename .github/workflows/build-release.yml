@@ -20,29 +20,13 @@ jobs:
         include:
           - os: windows
             arch: amd64
-            ext: .exe
-            gui_ext: .exe
             runs-on: windows-latest
           - os: darwin
             arch: amd64
-            ext: ''
-            gui_ext: .app
             runs-on: macos-latest
           - os: darwin
             arch: arm64
-            ext: ''
-            gui_ext: .app
             runs-on: macos-latest
-          - os: linux
-            arch: amd64
-            ext: ''
-            gui_ext: ''
-            runs-on: ubuntu-latest
-          - os: linux
-            arch: arm64
-            ext: ''
-            gui_ext: ''
-            runs-on: ubuntu-latest
 
     runs-on: ${{ matrix.runs-on }}
 
@@ -58,39 +42,31 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Install Fyne CLI
+      - name: Install Fyne CLI and dependencies
+        shell: bash
         run: |
-          go install fyne.io/tools/cmd/fyne@${{ env.FYNE_VERSION }}
-          go get -u fyne.io/fyne/v2@${{ env.FYNE_VERSION }}
+          go install fyne.io/tools/cmd/fyne@latest
+          go get fyne.io/fyne/v2@${{ env.FYNE_VERSION }}
+          go get fyne.io/systray
+          go mod tidy
 
       # Improved version reading
       - name: Read version
         id: version
         shell: bash
         run: |
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          VERSION=${VERSION#v}
-          if [ -z "$VERSION" ]; then
+          # For tag pushes, extract version from tag
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/v\(.*\),\1,')
+          else
+            # For manual triggers or branch pushes, read from VERSION file
             VERSION=$(cat VERSION | tr -d '[:space:]')
           fi
           echo "Detected version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # Separate CLI and GUI build steps for clarity
-      - name: Build CLI binary
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 0
-        run: |
-          OUTPUT="bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
-          go build -ldflags="-w -s -X main.Version=${{ steps.version.outputs.version }}" \
-            -o "$OUTPUT" ./cmd/bridge
-          echo "CLI binary created: $OUTPUT"
-
       - name: Build GUI application
-        # Only build GUI for macOS and Windows
-        if: matrix.os != 'linux'
+        shell: bash
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
@@ -104,34 +80,62 @@ jobs:
               --app-id "io.scorescrape.bridge" \
               --name "ScoreScrape Bridge" \
               --app-version "${{ steps.version.outputs.version }}" \
-              --icon "pkg/ui/Icon.png" \
+              --icon "${{ github.workspace }}/assets/Icon.png" \
               --src cmd/bridge \
               --tags gui \
               --release
-            mv "ScoreScrape Bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+            
+            # Debug: show what was created
+            echo "=== Files in current directory ==="
+            ls -la
+            echo "=== Files in cmd/bridge ==="
+            ls -la cmd/bridge || true
+            
+            # Find and rename the exe (handle different possible names)
+            if [ -f "ScoreScrape Bridge.exe" ]; then
+              mv "ScoreScrape Bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+            elif [ -f "bridge.exe" ]; then
+              mv "bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+            elif [ -f "cmd/bridge/ScoreScrape Bridge.exe" ]; then
+              mv "cmd/bridge/ScoreScrape Bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+            elif [ -f "cmd/bridge/bridge.exe" ]; then
+              mv "cmd/bridge/bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+            else
+              echo "ERROR: Could not find built exe file"
+              find . -name "*.exe" -type f
+              exit 1
+            fi
           else
             fyne package --target darwin \
               --app-id "io.scorescrape.bridge" \
               --name "ScoreScrape Bridge" \
               --app-version "${{ steps.version.outputs.version }}" \
-              --icon "pkg/ui/Icon.png" \
+              --icon "${{ github.workspace }}/assets/Icon.png" \
               --src cmd/bridge \
               --tags gui \
               --release
+            
+            # Debug: show what was created
+            echo "=== Files in current directory ==="
+            ls -la
+            echo "=== Files in cmd/bridge ==="
+            ls -la cmd/bridge || true
+            
             ARCH_SUFFIX=${{ matrix.arch }}
-            ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
+            # Find and copy the app bundle
+            if [ -d "ScoreScrape Bridge.app" ]; then
+              ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
+            elif [ -d "cmd/bridge/ScoreScrape Bridge.app" ]; then
+              ditto "cmd/bridge/ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
+            else
+              echo "ERROR: Could not find built app bundle"
+              find . -name "*.app" -type d
+              exit 1
+            fi
           fi
 
-      # Artifact upload steps
-      - name: Upload CLI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bridge-${{ matrix.os }}-${{ matrix.arch }}
-          path: bridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
-          retention-days: 30
-
+      # Artifact upload step
       - name: Upload GUI artifact
-        if: matrix.os != 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: gui-${{ matrix.os }}-${{ matrix.arch }}
@@ -164,7 +168,9 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "bridge-*" -o -name "ScoreScrape-Bridge-*" \) -exec cp {} release-assets/ \;
+          find artifacts -type f -name "ScoreScrape-Bridge-*" -exec cp {} release-assets/ \;
+          # Also copy .app directories
+          find artifacts -type d -name "*.app" -exec cp -r {} release-assets/ \;
           ls -lh release-assets/
 
       - name: Generate release notes
@@ -182,10 +188,10 @@ jobs:
           
           NOTES="## ScoreScrape Bridge $VERSION
 
-          ### Binaries
-          - Windows (64-bit)
-          - macOS Intel (64-bit)
-          - macOS Apple Silicon (ARM64)
+          ### Downloads
+          - Windows (64-bit) - .exe
+          - macOS Intel (64-bit) - .app
+          - macOS Apple Silicon (ARM64) - .app
 
           ### Changes
           $COMMITS"
