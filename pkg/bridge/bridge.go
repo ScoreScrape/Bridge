@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -90,16 +92,29 @@ func isUnusablePort(name string) bool {
 
 // getAppVersion reads the version from the VERSION file
 func getAppVersion() string {
+	// Get the executable path to help locate VERSION file
+	execPath, _ := os.Executable()
+	execDir := filepath.Dir(execPath)
+
 	// Try multiple possible locations for the VERSION file
 	possiblePaths := []string{
-		"VERSION",       // Current directory
-		"../VERSION",    // Parent directory (if running from cmd/bridge)
-		"../../VERSION", // Two levels up (if running from nested build dir)
+		"VERSION",                                           // Current working directory
+		filepath.Join(execDir, "VERSION"),                   // Same directory as executable
+		filepath.Join(execDir, "..", "VERSION"),             // Parent of executable directory
+		filepath.Join(execDir, "..", "..", "VERSION"),       // Two levels up from executable
+		filepath.Join(execDir, "..", "..", "..", "VERSION"), // Three levels up
+		"../VERSION",       // Relative parent directory
+		"../../VERSION",    // Two levels up relative
+		"../../../VERSION", // Three levels up relative
+		"./VERSION",        // Explicit current directory
 	}
 
 	for _, path := range possiblePaths {
 		if data, err := ioutil.ReadFile(path); err == nil {
-			return strings.TrimSpace(string(data))
+			version := strings.TrimSpace(string(data))
+			if version != "" {
+				return version
+			}
 		}
 	}
 
@@ -107,13 +122,24 @@ func getAppVersion() string {
 	return "unknown"
 }
 
-// getAppType determines if this is a Docker or Windows deployment
+// getAppType determines if this is a Docker, Windows, or macOS deployment
 func getAppType() string {
 	// Check if running in Docker environment (CLI only, no GUI)
 	if os.Getenv("BRIDGE_GUI") == "false" {
 		return "docker"
 	}
-	// Default to windows for GUI mode
+
+	// Detect macOS by checking for .app bundle structure or darwin OS
+	if strings.Contains(os.Args[0], ".app/Contents/MacOS/") {
+		return "macos"
+	}
+
+	// Check runtime OS as fallback
+	if runtime.GOOS == "darwin" {
+		return "macos"
+	}
+
+	// Default to windows for GUI mode on other platforms
 	return "windows"
 }
 
