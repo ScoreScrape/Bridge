@@ -162,12 +162,33 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Debug artifacts
+        run: |
+          echo "=== All downloaded content ==="
+          find artifacts -type f -ls
+          find artifacts -type d -name "*.app" -ls
+
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f -name "ScoreScrape-Bridge-*" -exec cp {} release-assets/ \;
-          # Also copy .app directories
-          find artifacts -type d -name "*.app" -exec cp -r {} release-assets/ \;
+          
+          # Debug: show what we downloaded
+          echo "=== Downloaded artifacts ==="
+          find artifacts -type f -name "ScoreScrape-Bridge-*" -o -name "*.exe" -o -name "*.app"
+          find artifacts -type d -name "*.app"
+          
+          # Copy executable files
+          find artifacts -type f -name "ScoreScrape-Bridge-*.exe" -exec cp {} release-assets/ \;
+          
+          # Copy .app directories and create zip archives for easier download
+          find artifacts -type d -name "ScoreScrape-Bridge-*.app" | while read app_path; do
+            app_name=$(basename "$app_path")
+            cp -r "$app_path" release-assets/
+            # Also create a zip for easier download
+            (cd release-assets && zip -r "${app_name}.zip" "$app_name")
+          done
+          
+          echo "=== Final release assets ==="
           ls -lh release-assets/
 
       - name: Generate release notes
@@ -199,6 +220,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: release-assets/*
-          body_file: release-notes.md
+          body_path: release-notes.md
           draft: false
           prerelease: false
