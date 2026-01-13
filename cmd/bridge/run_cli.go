@@ -37,8 +37,26 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 
 	b := bridge.New(bridgeID)
 
+	// Track rapid disconnections to detect session takeover
+	var lastDisconnectTime time.Time
+	var rapidDisconnectCount int
+
 	b.SetConnectionLostHandler(func(err error) {
-		log.Printf("Connection lost: %v", err)
+		now := time.Now()
+
+		// Detect rapid disconnections (likely session takeover)
+		if !lastDisconnectTime.IsZero() && now.Sub(lastDisconnectTime) < 5*time.Second {
+			rapidDisconnectCount++
+		} else {
+			rapidDisconnectCount = 0
+		}
+		lastDisconnectTime = now
+
+		if rapidDisconnectCount >= 2 {
+			log.Printf("Connection lost: %v (rapid disconnections detected - possible session takeover, will auto-recover)", err)
+		} else {
+			log.Printf("Connection lost: %v (MQTT will auto-reconnect)", err)
+		}
 	})
 
 	// Enhanced reconnection logic with circuit breaker
@@ -100,7 +118,7 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 		lastSuccessTime = time.Now()
 
 		errChan := make(chan error, 1)
-		healthCheckTicker := time.NewTicker(30 * time.Second)
+		healthCheckTicker := time.NewTicker(60 * time.Second) // Increased from 30s to give MQTT more time
 		defer healthCheckTicker.Stop()
 
 		go func() {
@@ -112,7 +130,7 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 
 		// Health monitoring loop
 		healthCheckFailures := 0
-		maxHealthCheckFailures := 5
+		maxHealthCheckFailures := 10 // Increased from 5 to be more tolerant
 
 		for {
 			select {
@@ -159,18 +177,38 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 					goto reconnectLoop
 				}
 			case <-healthCheckTicker.C:
-				// Periodic health check
+				// Periodic health check with smarter MQTT reconnection awareness
 				if !b.IsHealthy() {
 					healthCheckFailures++
-					log.Printf("Health check failed (%d/%d)", healthCheckFailures, maxHealthCheckFailures)
 
-					if healthCheckFailures >= maxHealthCheckFailures {
-						log.Printf("Device appears to be in unrecoverable state after %d failed health checks", healthCheckFailures)
-						b.Disconnect()
+					// Check if MQTT is actively attempting to auto-reconnect
+					isMQTTReconnecting := b.IsMQTTReconnecting()
+					disconnectedDuration, reconnectAttempts := b.GetMQTTReconnectionInfo()
 
-						// Force a longer delay and reset to try recovery
-						consecutiveFailures = maxConsecutiveFailures - 1 // Trigger near-circuit-breaker behavior
-						goto reconnectLoop
+					// Be more tolerant if MQTT is actively reconnecting
+					effectiveMaxFailures := maxHealthCheckFailures
+					if isMQTTReconnecting {
+						// Give MQTT more time to recover during session takeover scenarios
+						effectiveMaxFailures = maxHealthCheckFailures * 2
+						log.Printf("Health check failed (%d/%d) - MQTT reconnecting (disconnected for %v, attempt %d)",
+							healthCheckFailures, effectiveMaxFailures, disconnectedDuration, reconnectAttempts)
+					} else {
+						log.Printf("Health check failed (%d/%d)", healthCheckFailures, effectiveMaxFailures)
+					}
+
+					if healthCheckFailures >= effectiveMaxFailures {
+						if isMQTTReconnecting && disconnectedDuration < 10*time.Minute {
+							// MQTT is still trying and hasn't been disconnected too long
+							// Log but don't force reconnection yet
+							log.Printf("MQTT actively reconnecting for %v - allowing more time before forcing reset", disconnectedDuration)
+						} else {
+							log.Printf("Device appears to be in unrecoverable state after %d failed health checks", healthCheckFailures)
+							b.Disconnect()
+
+							// Force a longer delay and reset to try recovery
+							consecutiveFailures = maxConsecutiveFailures - 1 // Trigger near-circuit-breaker behavior
+							goto reconnectLoop
+						}
 					}
 				} else {
 					// Reset health check failures on successful check
