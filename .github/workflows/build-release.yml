@@ -22,11 +22,8 @@ jobs:
           - os: windows
             arch: amd64
             runs-on: windows-latest
-          - os: darwin
+          - os: macos
             arch: amd64
-            runs-on: macos-latest
-          - os: darwin
-            arch: arm64
             runs-on: macos-latest
 
     runs-on: ${{ matrix.runs-on }}
@@ -69,7 +66,7 @@ jobs:
       - name: Build GUI application
         shell: bash
         env:
-          GOOS: ${{ matrix.os }}
+          GOOS: ${{ matrix.os == 'macos' && 'darwin' || matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
           # Ensure Fyne CLI is in PATH
@@ -94,13 +91,13 @@ jobs:
             
             # Find and rename the exe (handle different possible names)
             if [ -f "ScoreScrape Bridge.exe" ]; then
-              mv "ScoreScrape Bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+              mv "ScoreScrape Bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
             elif [ -f "bridge.exe" ]; then
-              mv "bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+              mv "bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
             elif [ -f "cmd/bridge/ScoreScrape Bridge.exe" ]; then
-              mv "cmd/bridge/ScoreScrape Bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+              mv "cmd/bridge/ScoreScrape Bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
             elif [ -f "cmd/bridge/bridge.exe" ]; then
-              mv "cmd/bridge/bridge.exe" "ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe"
+              mv "cmd/bridge/bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
             else
               echo "ERROR: Could not find built exe file"
               find . -name "*.exe" -type f
@@ -122,12 +119,11 @@ jobs:
             echo "=== Files in cmd/bridge ==="
             ls -la cmd/bridge || true
             
-            ARCH_SUFFIX=${{ matrix.arch }}
             # Find and copy the app bundle
             if [ -d "ScoreScrape Bridge.app" ]; then
-              ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
+              ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
             elif [ -d "cmd/bridge/ScoreScrape Bridge.app" ]; then
-              ditto "cmd/bridge/ScoreScrape Bridge.app" "ScoreScrape-Bridge-macOS-${ARCH_SUFFIX}.app"
+              ditto "cmd/bridge/ScoreScrape Bridge.app" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
             else
               echo "ERROR: Could not find built app bundle"
               find . -name "*.app" -type d
@@ -141,8 +137,8 @@ jobs:
         with:
           name: gui-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            ScoreScrape-Bridge-windows-${{ matrix.arch }}.exe
-            ScoreScrape-Bridge-macOS-${{ matrix.arch }}.app
+            ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe
+            ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app
           if-no-files-found: ignore
           retention-days: 30
 
@@ -192,7 +188,6 @@ jobs:
           ### Downloads
           - Windows (64-bit) - .exe
           - macOS Intel (64-bit) - .app
-          - macOS Apple Silicon (ARM64) - .app
 
           ### Changes
           $COMMITS"
