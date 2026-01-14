@@ -18,9 +18,10 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# build the binary (Docker mode, no GUI - default build excludes gui tag)
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} \
-    go build -ldflags="-w -s" -o /bridge ./cmd/bridge
+# Read version from VERSION file and embed it at build time
+RUN VERSION=$(cat VERSION | tr -d '[:space:]') && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} \
+    go build -ldflags="-w -s -X bridge/pkg/bridge.Version=${VERSION}" -o /bridge ./cmd/bridge
 
 FROM alpine:latest
 

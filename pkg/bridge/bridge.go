@@ -26,6 +26,10 @@ const (
 	SerialReadTimeout        = 100 * time.Millisecond
 )
 
+// Version can be set at build time via ldflags:
+// go build -ldflags="-X bridge/pkg/bridge.Version=1.0.0"
+var Version = ""
+
 // Message structures for MQTT communication
 type SettingsMessage struct {
 	ConnectedBaud int `json:"connected_baud"`
@@ -90,23 +94,27 @@ func isUnusablePort(name string) bool {
 	return strings.Contains(low, "bluetooth") && !strings.Contains(low, "usb")
 }
 
-// getAppVersion reads the version from the VERSION file
+// getAppVersion returns the application version
 func getAppVersion() string {
-	// Get the executable path to help locate VERSION file
+	// First check if version was set at build time
+	if Version != "" {
+		return Version
+	}
+
+	// Fall back to reading from VERSION file (for local development)
 	execPath, _ := os.Executable()
 	execDir := filepath.Dir(execPath)
 
-	// Try multiple possible locations for the VERSION file
 	possiblePaths := []string{
-		"VERSION",                                           // Current working directory
-		filepath.Join(execDir, "VERSION"),                   // Same directory as executable
-		filepath.Join(execDir, "..", "VERSION"),             // Parent of executable directory
-		filepath.Join(execDir, "..", "..", "VERSION"),       // Two levels up from executable
-		filepath.Join(execDir, "..", "..", "..", "VERSION"), // Three levels up
-		"../VERSION",       // Relative parent directory
-		"../../VERSION",    // Two levels up relative
-		"../../../VERSION", // Three levels up relative
-		"./VERSION",        // Explicit current directory
+		"VERSION",
+		filepath.Join(execDir, "VERSION"),
+		filepath.Join(execDir, "..", "VERSION"),
+		filepath.Join(execDir, "..", "..", "VERSION"),
+		filepath.Join(execDir, "..", "..", "..", "VERSION"),
+		"../VERSION",
+		"../../VERSION",
+		"../../../VERSION",
+		"./VERSION",
 	}
 
 	for _, path := range possiblePaths {
@@ -118,7 +126,6 @@ func getAppVersion() string {
 		}
 	}
 
-	// Fallback version if file not found
 	return "unknown"
 }
 
@@ -274,11 +281,6 @@ type Bridge struct {
 	statusMutex          sync.Mutex // Changed from RWMutex for simplicity
 	dataTimeoutDuration  time.Duration
 	dataActivityStopChan chan struct{}
-
-	// Health monitoring fields
-	lastHealthyTime      time.Time
-	healthCheckInterval  time.Duration
-	maxUnhealthyDuration time.Duration
 }
 
 func New(bridgeID string) *Bridge {
@@ -292,26 +294,28 @@ func New(bridgeID string) *Bridge {
 		currentStatus:        "offline",
 		dataTimeoutDuration:  DataActivityTimeout,
 		dataActivityStopChan: make(chan struct{}),
-		lastHealthyTime:      time.Now(),
-		healthCheckInterval:  30 * time.Second,
-		maxUnhealthyDuration: 5 * time.Minute,
 	}
 }
 
 func (b *Bridge) SetConnectionLostHandler(h func(error)) { b.onConnectionLost = h }
 
 // IsHealthy checks if the bridge is in a healthy state
+// A bridge is healthy if both serial and MQTT connections are active
 func (b *Bridge) IsHealthy() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	// Check if we have both serial and MQTT connections
-	if b.serialPort == nil || b.mqttClient == nil || !b.mqttClient.IsConnected() {
+	if b.serialPort == nil {
 		return false
 	}
 
-	// Check if we've been unhealthy for too long
-	if time.Since(b.lastHealthyTime) > b.maxUnhealthyDuration {
+	if b.mqttClient == nil {
+		return false
+	}
+
+	// MQTT connected or actively reconnecting counts as healthy
+	if !b.mqttClient.IsConnected() && !b.mqttClient.IsReconnecting() {
 		return false
 	}
 
@@ -347,13 +351,6 @@ func (b *Bridge) GetMQTTReconnectionInfo() (disconnectedDuration time.Duration, 
 		disconnectedDuration = time.Since(disconnectTime)
 	}
 	return disconnectedDuration, attempts
-}
-
-// markHealthy updates the last healthy timestamp
-func (b *Bridge) markHealthy() {
-	b.mu.Lock()
-	b.lastHealthyTime = time.Now()
-	b.mu.Unlock()
 }
 
 // updateStatus updates the bridge status with proper retention control
@@ -450,9 +447,6 @@ func (b *Bridge) onDataReceived() {
 			fmt.Printf("Data reception handler panic recovered: %v\n", r)
 		}
 	}()
-
-	// Mark bridge as healthy when receiving data
-	b.markHealthy()
 
 	// If we were waiting, transition back to online
 	if b.getCurrentStatus() == "waiting" {
