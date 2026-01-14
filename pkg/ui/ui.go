@@ -351,6 +351,7 @@ func (t *ShadcnTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Co
 	secondary := color.RGBA{103, 103, 228, 255}
 	zinc50 := color.RGBA{250, 250, 250, 255}
 	zinc800 := color.RGBA{39, 39, 42, 255}
+	zinc900 := color.RGBA{24, 24, 27, 255}
 	switch n {
 	case theme.ColorNameBackground:
 		return black
@@ -360,6 +361,12 @@ func (t *ShadcnTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Co
 		return secondary
 	case theme.ColorNameButton:
 		return zinc800
+	case theme.ColorNameInputBackground:
+		return zinc900
+	case theme.ColorNamePlaceHolder:
+		return color.RGBA{113, 113, 122, 255}
+	case theme.ColorNameDisabled:
+		return color.RGBA{113, 113, 122, 255}
 	}
 	return theme.DefaultTheme().Color(n, v)
 }
