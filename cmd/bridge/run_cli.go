@@ -125,7 +125,11 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 			errChan <- err
 		}()
 
-		// Main event loop - just handle shutdown and errors
+		// Health check ticker to monitor MQTT connection
+		healthTicker := time.NewTicker(30 * time.Second)
+		defer healthTicker.Stop()
+
+		// Main event loop - handle shutdown, errors, and health checks
 		for {
 			select {
 			case <-sigChan:
@@ -134,6 +138,24 @@ Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
 				time.Sleep(500 * time.Millisecond)
 				log.Println("Bridge stopped")
 				return
+			case <-healthTicker.C:
+				// Check if MQTT is stuck in a failed reconnection state
+				if b.IsMQTTReconnecting() {
+					duration, attempts := b.GetMQTTReconnectionInfo()
+					// If MQTT has been trying to reconnect for more than 5 minutes, force full restart
+					if duration > 5*time.Minute {
+						log.Printf("MQTT reconnection stuck after %v (%d attempts). Forcing full reconnection...", duration, attempts)
+						errChan <- nil // Trigger reconnection
+						goto reconnectLoop
+					} else if attempts > 0 {
+						log.Printf("MQTT reconnecting... (disconnected for %v, %d attempts)", duration, attempts)
+					}
+				} else if !b.IsHealthy() {
+					// Bridge is unhealthy and not reconnecting - force restart
+					log.Println("Bridge unhealthy (MQTT not connected and not reconnecting). Forcing reconnection...")
+					errChan <- nil
+					goto reconnectLoop
+				}
 			case err := <-errChan:
 				connectionDuration := time.Since(lastSuccessTime)
 
