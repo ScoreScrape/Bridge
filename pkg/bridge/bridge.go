@@ -165,15 +165,15 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		AddBroker(broker).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
-		SetMaxReconnectInterval(1 * time.Minute).  // Longer max interval
-		SetConnectRetryInterval(5 * time.Second).  // Initial retry interval
-		SetKeepAlive(30 * time.Second).            // More frequent keepalive to detect issues faster
-		SetPingTimeout(10 * time.Second).          // Ping timeout
-		SetConnectTimeout(30 * time.Second).       // Connect timeout
-		SetWriteTimeout(10 * time.Second).         // Write timeout
-		SetMessageChannelDepth(1000).              // Message buffer
-		SetCleanSession(false).                    // Persist session to survive reconnects
-		SetResumeSubs(true)                        // Auto-resubscribe on reconnect
+		SetMaxReconnectInterval(1 * time.Minute). // Longer max interval
+		SetConnectRetryInterval(5 * time.Second). // Initial retry interval
+		SetKeepAlive(30 * time.Second).           // More frequent keepalive to detect issues faster
+		SetPingTimeout(10 * time.Second).         // Ping timeout
+		SetConnectTimeout(30 * time.Second).      // Connect timeout
+		SetWriteTimeout(10 * time.Second).        // Write timeout
+		SetMessageChannelDepth(1000).             // Message buffer
+		SetCleanSession(false).                   // Persist session to survive reconnects
+		SetResumeSubs(true)                       // Auto-resubscribe on reconnect
 
 	if lwtTopic != "" && lwtPayload != nil {
 		opts.SetWill(lwtTopic, string(lwtPayload), 0, true)
