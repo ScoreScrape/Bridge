@@ -165,13 +165,15 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		AddBroker(broker).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
-		SetMaxReconnectInterval(30 * time.Second). // Increased from 10s
-		SetConnectRetryInterval(5 * time.Second).  // Add initial retry interval
-		SetKeepAlive(60 * time.Second).            // Increase keep alive
-		SetPingTimeout(10 * time.Second).          // Increase ping timeout
-		SetConnectTimeout(30 * time.Second).       // Add connect timeout
-		SetWriteTimeout(10 * time.Second).         // Add write timeout
-		SetMessageChannelDepth(1000)               // Increase message buffer
+		SetMaxReconnectInterval(1 * time.Minute).  // Longer max interval
+		SetConnectRetryInterval(5 * time.Second).  // Initial retry interval
+		SetKeepAlive(30 * time.Second).            // More frequent keepalive to detect issues faster
+		SetPingTimeout(10 * time.Second).          // Ping timeout
+		SetConnectTimeout(30 * time.Second).       // Connect timeout
+		SetWriteTimeout(10 * time.Second).         // Write timeout
+		SetMessageChannelDepth(1000).              // Message buffer
+		SetCleanSession(false).                    // Persist session to survive reconnects
+		SetResumeSubs(true)                        // Auto-resubscribe on reconnect
 
 	if lwtTopic != "" && lwtPayload != nil {
 		opts.SetWill(lwtTopic, string(lwtPayload), 0, true)
@@ -190,20 +192,32 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		}
 	})
 
-	// Track reconnection attempts
+	// Track reconnection attempts with logging
 	opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
 		m.mu.Lock()
 		m.reconnectionAttempts++
+		attempts := m.reconnectionAttempts
 		m.isReconnecting = true
 		m.mu.Unlock()
+
+		// Log every 10 attempts to avoid spam
+		if attempts%10 == 1 {
+			fmt.Printf("MQTT reconnection attempt %d...\n", attempts)
+		}
 	})
 
-	// Track successful reconnection
+	// Track successful reconnection with logging
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		m.mu.Lock()
+		wasReconnecting := m.isReconnecting
+		attempts := m.reconnectionAttempts
 		m.isReconnecting = false
 		m.reconnectionAttempts = 0
 		m.mu.Unlock()
+
+		if wasReconnecting && attempts > 0 {
+			fmt.Printf("MQTT reconnected successfully after %d attempts\n", attempts)
+		}
 	})
 
 	m.client = mqtt.NewClient(opts)
