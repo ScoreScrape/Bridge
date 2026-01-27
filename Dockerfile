@@ -5,27 +5,25 @@ RUN apk add --no-cache git
 WORKDIR /build
 
 COPY go.mod go.sum ./
-
 RUN go mod download
 
 COPY . .
-
-# ensure dependencies are resolved
 RUN go mod tidy
 
-# build args for cross compilation
+# sync VERSION for go:embed
+RUN cp VERSION pkg/bridge/VERSION
+
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# Read version from VERSION file and embed it at build time
+# embed version via ldflags (takes priority over go:embed)
 RUN VERSION=$(cat VERSION | tr -d '[:space:]') && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} \
     go build -ldflags="-w -s -X bridge/pkg/bridge.Version=${VERSION}" -o /bridge ./cmd/bridge
 
 FROM alpine:latest
 
-# install ca-certificates for MQTT TLS connections
 RUN apk add --no-cache ca-certificates tzdata
 
 RUN addgroup -g 1000 bridge && \
@@ -34,7 +32,6 @@ RUN addgroup -g 1000 bridge && \
 COPY --from=builder /bridge /usr/local/bin/bridge
 
 USER bridge
-
 WORKDIR /home/bridge
 
 ENV BRIDGE_ID="" \
