@@ -11,6 +11,7 @@ import (
 // TODO: Probably not set this statically
 // in the future this URL may change or there will be different regions
 const MQTTBroker = "mqtts://broker.scorescrape.io:8883"
+
 // Also certificate pinning????
 
 type MQTTClient struct {

@@ -69,10 +69,10 @@ type App struct {
 	rxDot      *canvas.Circle
 	errorLabel *widget.Label
 
-	mu               sync.Mutex
-	state            state
-	busy             bool
-	rxTimer          *time.Timer
+	mu                sync.Mutex
+	state             state
+	busy              bool
+	rxTimer           *time.Timer
 	reconnectAttempts int
 }
 
@@ -214,7 +214,7 @@ func (a *App) connect(id, port string) {
 
 	// Ensure any previous bridge is fully cleaned up
 	a.cleanupBridge()
-	
+
 	a.bridge = bridge.New(id)
 	a.setState(connecting)
 
@@ -227,12 +227,12 @@ func (a *App) connect(id, port string) {
 			a.setError(errMsg)
 			return
 		}
-		
+
 		a.mu.Lock()
 		a.reconnectAttempts++
 		attempts := a.reconnectAttempts
 		a.mu.Unlock()
-		
+
 		if attempts <= 2 {
 			a.setState(reconnecting)
 			a.setError(a.formatConnectionError(err))
@@ -250,7 +250,7 @@ func (a *App) connect(id, port string) {
 		a.cleanupBridge()
 		a.setState(disconnected)
 		a.setError(errMsg)
-		
+
 		a.mu.Lock()
 		a.reconnectAttempts = 0
 		a.mu.Unlock()
@@ -260,7 +260,7 @@ func (a *App) connect(id, port string) {
 	a.mu.Lock()
 	a.reconnectAttempts = 0
 	a.mu.Unlock()
-	
+
 	a.setState(connected)
 
 	err := a.bridge.Start(func(d []byte) { a.onRx() })
@@ -278,12 +278,12 @@ func (a *App) connect(id, port string) {
 			a.setError(errMsg)
 			return
 		}
-		
+
 		a.mu.Lock()
 		a.reconnectAttempts++
 		attempts := a.reconnectAttempts
 		a.mu.Unlock()
-		
+
 		if attempts <= 2 {
 			a.setState(reconnecting)
 			a.setError(a.formatConnectionError(err))
@@ -373,12 +373,12 @@ func (a *App) clearError() {
 
 func (a *App) formatConnectionError(err error) string {
 	errMsg := err.Error()
-	
+
 	// MQTT duplicate connection (EOF means another bridge with same ID is connected)
 	if contains(errMsg, "EOF") {
 		return "Another bridge with this ID is already connected. Disconnect it first or use a different Bridge ID."
 	}
-	
+
 	// Serial port errors
 	if contains(errMsg, "busy") || contains(errMsg, "in use") {
 		return "Serial port is busy. Wait a moment and try again."
@@ -392,7 +392,7 @@ func (a *App) formatConnectionError(err error) string {
 	if contains(errMsg, "device not configured") || contains(errMsg, "port is not open") {
 		return "Serial port is not available. Check if device is connected."
 	}
-	
+
 	// MQTT errors
 	if contains(errMsg, "network is unreachable") || contains(errMsg, "no route to host") {
 		return "No internet connection. Check your network settings."
@@ -406,15 +406,15 @@ func (a *App) formatConnectionError(err error) string {
 	if contains(errMsg, "not authorized") || contains(errMsg, "bad user name or password") {
 		return "Authentication failed. Check your Bridge ID."
 	}
-	
+
 	// Generic fallback
 	return "Connection failed: " + errMsg
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && 
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
-		findSubstring(s, substr)))
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			findSubstring(s, substr)))
 }
 
 func findSubstring(s, substr string) bool {
