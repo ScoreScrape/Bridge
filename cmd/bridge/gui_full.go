@@ -2,14 +2,9 @@
 
 package main
 
-import (
-	"bridge/pkg/ui"
-	"log"
-)
+import "bridge/pkg/ui"
 
 func StartGUI() bool {
-	log.Println("Starting ScoreScrape Bridge in GUI mode...")
-	app := ui.NewApp()
-	app.Run()
+	ui.NewApp().Run()
 	return true
 }
