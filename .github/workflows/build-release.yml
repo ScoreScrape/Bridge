@@ -1,21 +1,16 @@
-name: Build Release Binaries
+name: Build Release
 
 on:
   push:
-    tags:
-      - 'v*'
-      - 'Beta_v*'
+    tags: ['v*', 'Beta_v*']
   workflow_dispatch:
 
-# Reduce redundancy and improve caching
 env:
   GO_VERSION: '1.21'
-  FYNE_VERSION: 'v2.7.2'
 
 jobs:
   build:
     strategy:
-      # Fail-fast set to false to allow other builds to continue if one fails
       fail-fast: false
       matrix:
         include:
@@ -29,50 +24,43 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Install Fyne CLI and dependencies
+      - name: Setup
         shell: bash
         run: |
           go install fyne.io/tools/cmd/fyne@latest
-          go get fyne.io/fyne/v2@${{ env.FYNE_VERSION }}
+          go get fyne.io/fyne/v2@v2.7.2
           go get fyne.io/systray
           go mod tidy
+          cp VERSION pkg/bridge/VERSION
 
-      # Improved version reading
-      - name: Read version
+      - name: Get version
         id: version
         shell: bash
         run: |
-          # For tag pushes, extract version from tag
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/v\(.*\),\1,')
           else
-            # For manual triggers or branch pushes, read from VERSION file
             VERSION=$(cat VERSION | tr -d '[:space:]')
           fi
-          echo "Detected version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Build GUI application
+      - name: Build
         shell: bash
         env:
           GOOS: ${{ matrix.os == 'macos' && 'darwin' || matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          # Ensure Fyne CLI is in PATH
           export PATH="$PATH:$(go env GOPATH)/bin"
-          
-          # Platform-specific build commands
+
           if [ "${{ matrix.os }}" == "windows" ]; then
             fyne package --target windows \
               --app-id "io.scorescrape.bridge" \
@@ -82,27 +70,14 @@ jobs:
               --src cmd/bridge \
               --tags gui \
               --release
-            
-            # Debug: show what was created
-            echo "=== Files in current directory ==="
-            ls -la
-            echo "=== Files in cmd/bridge ==="
-            ls -la cmd/bridge || true
-            
-            # Find and rename the exe (handle different possible names)
-            if [ -f "ScoreScrape Bridge.exe" ]; then
-              mv "ScoreScrape Bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
-            elif [ -f "bridge.exe" ]; then
-              mv "bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
-            elif [ -f "cmd/bridge/ScoreScrape Bridge.exe" ]; then
-              mv "cmd/bridge/ScoreScrape Bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
-            elif [ -f "cmd/bridge/bridge.exe" ]; then
-              mv "cmd/bridge/bridge.exe" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
-            else
-              echo "ERROR: Could not find built exe file"
-              find . -name "*.exe" -type f
-              exit 1
-            fi
+
+            # find the exe
+            for f in "ScoreScrape Bridge.exe" "bridge.exe" "cmd/bridge/ScoreScrape Bridge.exe" "cmd/bridge/bridge.exe"; do
+              if [ -f "$f" ]; then
+                mv "$f" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe"
+                break
+              fi
+            done
           else
             fyne package --target darwin \
               --app-id "io.scorescrape.bridge" \
@@ -112,28 +87,17 @@ jobs:
               --src cmd/bridge \
               --tags gui \
               --release
-            
-            # Debug: show what was created
-            echo "=== Files in current directory ==="
-            ls -la
-            echo "=== Files in cmd/bridge ==="
-            ls -la cmd/bridge || true
-            
-            # Find and copy the app bundle
-            if [ -d "ScoreScrape Bridge.app" ]; then
-              ditto "ScoreScrape Bridge.app" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
-            elif [ -d "cmd/bridge/ScoreScrape Bridge.app" ]; then
-              ditto "cmd/bridge/ScoreScrape Bridge.app" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
-            else
-              echo "ERROR: Could not find built app bundle"
-              find . -name "*.app" -type d
-              exit 1
-            fi
+
+            # find the app bundle
+            for d in "ScoreScrape Bridge.app" "cmd/bridge/ScoreScrape Bridge.app"; do
+              if [ -d "$d" ]; then
+                ditto "$d" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
+                break
+              fi
+            done
           fi
 
-      # Artifact upload step
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: gui-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -145,81 +109,53 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    # Only create release for tagged versions
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Debug artifacts
-        run: |
-          echo "=== All downloaded content ==="
-          find artifacts -type f -ls
-          find artifacts -type d -name "*.app" -ls
-
-      - name: Prepare release assets
+      - name: Prepare assets
         run: |
           mkdir -p release-assets
-          
-          # Debug: show what we downloaded
-          echo "=== Downloaded artifacts ==="
-          find artifacts -type f -name "ScoreScrape-Bridge-*" -o -name "*.exe" -o -name "*.app"
-          find artifacts -type d -name "*.app"
-          
-          # Copy executable files
-          find artifacts -type f -name "ScoreScrape-Bridge-*.exe" -exec cp {} release-assets/ \;
-          
-          # Copy .app directories and create zip archives for easier download
-          find artifacts -type d -name "ScoreScrape-Bridge-*.app" | while read app_path; do
-            app_name=$(basename "$app_path")
-            cp -r "$app_path" release-assets/
-            # Also create a zip for easier download
-            (cd release-assets && zip -r "${app_name}.zip" "$app_name")
+          find artifacts -type f -name "*.exe" -exec cp {} release-assets/ \;
+          find artifacts -type d -name "*.app" | while read app; do
+            name=$(basename "$app")
+            cp -r "$app" release-assets/
+            (cd release-assets && zip -r "${name}.zip" "$name")
           done
-          
-          echo "=== Final release assets ==="
-          ls -lh release-assets/
 
-      - name: Generate release notes
-        id: notes
+      - name: Release notes
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          
-          # Limit to last 6 commits, format nicely
-          if [ -z "$PREV_TAG" ]; then
-            COMMITS=$(git log --pretty=format:"- %s (%an)" --no-merges -6)
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" --no-merges -6)
           else
-            COMMITS=$(git log --pretty=format:"- %s (%an)" --no-merges ${PREV_TAG}..HEAD)
+            COMMITS=$(git log --pretty=format:"- %s" --no-merges ${PREV}..HEAD)
           fi
-          
-          NOTES="## ScoreScrape Bridge $VERSION
+
+          cat > release-notes.md << EOF
+          ## ScoreScrape Bridge $VERSION
 
           ### Downloads
-          - Windows (64-bit) - .exe
-          - macOS Intel (64-bit) - .app
+          - Windows (64-bit): .exe
+          - macOS Intel (64-bit): .app
 
           ### Changes
-          $COMMITS"
-          
-          echo "$NOTES" > release-notes.md
-          cat release-notes.md
+          $COMMITS
+          EOF
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - uses: softprops/action-gh-release@v1
         with:
           files: release-assets/*
           body_path: release-notes.md
-          draft: false
-          prerelease: false
