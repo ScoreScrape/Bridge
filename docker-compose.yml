@@ -3,12 +3,9 @@ services:
     image: ghcr.io/scorescrape/bridge:latest
     container_name: scorescrape-bridge
     environment:
-      # Replace with your Bridge ID
-      - BRIDGE_ID=YOUR_BRIDGE_ID_HERE
+      - BRIDGE_ID=<Your Bridge ID>
     devices:
-      # Change to the serial port you want to use
-      # Format is local_device:container_device
-      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB0:/dev/ttyUSB0  # change left side to your serial port
     group_add:
       - dialout
     restart: unless-stopped
