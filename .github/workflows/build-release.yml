@@ -41,6 +41,8 @@ jobs:
           go get fyne.io/systray
           go mod tidy
           cp VERSION pkg/bridge/VERSION
+          cp assets/Icon.png pkg/ui/Icon.png
+          cp assets/DarkLogo.png pkg/ui/DarkLogo.png
 
       - name: Get version
         id: version

@@ -12,6 +12,10 @@ VERSION=$(cat VERSION 2>/dev/null || echo "1.0.0")
 # sync VERSION into pkg/bridge for go:embed
 cp VERSION pkg/bridge/VERSION
 
+# copy images for go:embed (can't use symlinks or .. paths)
+cp assets/Icon.png pkg/ui/Icon.png
+cp assets/DarkLogo.png pkg/ui/DarkLogo.png
+
 echo "Building ${APP_NAME} v${VERSION} for macOS..."
 
 # ensure fyne CLI is available

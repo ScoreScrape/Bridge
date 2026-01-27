@@ -13,6 +13,10 @@ RUN go mod tidy
 # sync VERSION for go:embed
 RUN cp VERSION pkg/bridge/VERSION
 
+# copy images for go:embed (can't use symlinks or .. paths)
+RUN cp assets/Icon.png pkg/ui/Icon.png && \
+    cp assets/DarkLogo.png pkg/ui/DarkLogo.png
+
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
