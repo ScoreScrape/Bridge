@@ -28,6 +28,7 @@ Thumbs.db
 *.out
 go.work
 fyne_metadata_init.go
+pkg/bridge/VERSION
 
 # Local Docker Build
 *.env
