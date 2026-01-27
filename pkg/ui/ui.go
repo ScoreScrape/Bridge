@@ -17,10 +17,10 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-//go:embed Icon.png
+//go:embed ../../assets/Icon.png
 var iconBytes []byte
 
-//go:embed DarkLogo.png
+//go:embed ../../assets/DarkLogo.png
 var logoBytes []byte
 
 var (

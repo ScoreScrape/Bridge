@@ -31,7 +31,7 @@ $FYNE_CMD package --target darwin \
     --app-id "${APP_ID}" \
     --name "${APP_NAME}" \
     --app-version "${VERSION}" \
-    --icon "${SCRIPT_DIR}/pkg/ui/Icon.png" \
+    --icon "${SCRIPT_DIR}/assets/Icon.png" \
     --src cmd/bridge \
     --tags gui \
     --release

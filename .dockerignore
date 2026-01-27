@@ -6,9 +6,6 @@
 build.sh
 docker-build.sh
 recordings/
-assets/
-pkg/ui/Icon.png
-pkg/ui/DarkLogo.png
 pkg/ui/app.go
 pkg/ui/theme.go
 cmd/bridge-gui/
