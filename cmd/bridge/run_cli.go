@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	serialPort         = "/dev/ttyUSB0"
+	defaultSerialPort  = "/dev/ttyUSB0"
 	maxFailures        = 10
 	circuitBreakerWait = 15 * time.Minute
 	healthCheckPeriod  = 30 * time.Second
@@ -22,9 +22,10 @@ func runCLI() {
 		log.Fatal("BRIDGE_ID required")
 	}
 
-	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
-		log.Printf("Serial port %s not found. Check your docker device mapping.", serialPort)
-		log.Fatal("Ex: --device=/dev/YOUR_PORT:/dev/ttyUSB0")
+	replayFile := os.Getenv("REPLAY_FILE")
+	serialPort := os.Getenv("SERIAL_PORT")
+	if serialPort == "" {
+		serialPort = defaultSerialPort
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -34,6 +35,12 @@ func runCLI() {
 
 	var lastDisconnect time.Time
 	var rapidCount int
+
+	// Replay mode: use JSONL file instead of serial port (no connection-lost handler)
+	if replayFile != "" {
+		runReplayMode(b, replayFile, sig)
+		return
+	}
 
 	b.SetConnectionLostHandler(func(err error) {
 		if !lastDisconnect.IsZero() && time.Since(lastDisconnect) < 5*time.Second {
@@ -49,6 +56,12 @@ func runCLI() {
 			log.Printf("Connection lost: %v (will auto-reconnect)", err)
 		}
 	})
+
+	// Serial mode
+	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
+		log.Printf("Serial port %s not found. Check your docker device mapping.", serialPort)
+		log.Fatal("Ex: --device=/dev/YOUR_PORT:/dev/ttyUSB0 (or set REPLAY_FILE for replay mode)")
+	}
 
 	backoff := newBackoff()
 
@@ -168,5 +181,34 @@ func waitOrSignal(sig chan os.Signal, d time.Duration) bool {
 		return true
 	case <-time.After(d):
 		return false
+	}
+}
+
+func runReplayMode(b *bridge.Bridge, replayFile string, sig chan os.Signal) {
+	if _, err := os.Stat(replayFile); os.IsNotExist(err) {
+		log.Fatalf("Replay file not found: %s", replayFile)
+	}
+
+	log.Printf("Replaying from %s (bridge: %s)", replayFile, os.Getenv("BRIDGE_ID"))
+
+	if err := b.ConnectReplay(replayFile); err != nil {
+		log.Fatalf("Connect replay failed: %v", err)
+	}
+
+	log.Println("Connected (replay mode)")
+	done := make(chan error, 1)
+	go func() {
+		done <- b.Start(nil)
+	}()
+
+	select {
+	case <-sig:
+		log.Println("Shutting down...")
+		b.Disconnect()
+	case err := <-done:
+		if err != nil {
+			log.Printf("Replay ended: %v", err)
+		}
+		b.Disconnect()
 	}
 }
