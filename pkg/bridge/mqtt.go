@@ -1,7 +1,7 @@
 package bridge
 
 import (
-	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -18,10 +18,11 @@ type MQTTClient struct {
 	client           mqtt.Client
 	onConnectionLost func(error)
 
-	mu                sync.RWMutex
-	disconnectTime    time.Time
-	reconnectAttempts int
-	reconnecting      bool
+	mu                 sync.RWMutex
+	disconnectTime     time.Time
+	reconnectAttempts  int
+	reconnecting       bool
+	lastReconnectLog   time.Time
 }
 
 func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTClient {
@@ -63,8 +64,8 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		attempts := m.reconnectAttempts
 		m.mu.Unlock()
 
-		if attempts%10 == 1 {
-			fmt.Printf("MQTT reconnect attempt %d...\n", attempts)
+		if attempts == 1 || attempts%50 == 0 {
+			log.Printf("MQTT reconnect attempt %d...", attempts)
 		}
 	})
 
@@ -72,12 +73,19 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		m.mu.Lock()
 		wasReconnecting := m.reconnecting
 		attempts := m.reconnectAttempts
+		lastLog := m.lastReconnectLog
 		m.reconnecting = false
 		m.reconnectAttempts = 0
 		m.mu.Unlock()
 
 		if wasReconnecting && attempts > 0 {
-			fmt.Printf("MQTT reconnected after %d attempts\n", attempts)
+			now := time.Now()
+			if lastLog.IsZero() || now.Sub(lastLog) > 30*time.Second {
+				m.mu.Lock()
+				m.lastReconnectLog = now
+				m.mu.Unlock()
+				log.Printf("MQTT reconnected after %d attempts", attempts)
+			}
 		}
 	})
 

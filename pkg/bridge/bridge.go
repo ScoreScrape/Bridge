@@ -9,12 +9,18 @@ import (
 
 const DataActivityTimeout = 5 * time.Second
 
+// dataReader abstracts serial port and replay file for reading raw bytes.
+type dataReader interface {
+	Read(buf []byte) (int, error)
+	Close() error
+}
+
 type Bridge struct {
 	id        string
 	dataTopic string
 
 	mu       sync.RWMutex
-	serial   *SerialPort
+	reader   dataReader
 	mqtt     *MQTTClient
 	parser   *FrameParser
 	portName string
@@ -65,7 +71,7 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 	if err != nil {
 		return err
 	}
-	b.serial = serial
+	b.reader = serial
 
 	statusTopic := fmt.Sprintf("bridges/%s/status", b.id)
 	lwt, _ := json.Marshal(map[string]string{"status": "offline"})
@@ -74,8 +80,8 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 	mqtt.onConnectionLost = b.onConnectionLost
 
 	if err := mqtt.Connect(); err != nil {
-		b.serial.Close()
-		b.serial = nil
+		b.reader.Close()
+		b.reader = nil
 		return err
 	}
 	b.mqtt = mqtt
@@ -84,10 +90,59 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 		var msg struct {
 			ConnectedBaud int `json:"connected_baud"`
 		}
-		if json.Unmarshal(data, &msg) == nil && msg.ConnectedBaud > 0 && msg.ConnectedBaud != b.baudRate {
+		if json.Unmarshal(data, &msg) == nil && msg.ConnectedBaud > 0 && msg.ConnectedBaud != b.baudRate && b.portName != "" {
 			b.reconnectSerial(msg.ConnectedBaud)
 		}
 	})
+
+	online, _ := json.Marshal(map[string]string{"status": "online"})
+	mqtt.PublishRetained(statusTopic, online)
+
+	version, _ := json.Marshal(map[string]string{"version": GetVersion()})
+	mqtt.Publish(statusTopic, version)
+
+	appType, _ := json.Marshal(map[string]string{"type": GetAppType()})
+	mqtt.Publish(statusTopic, appType)
+
+	b.statusMu.Lock()
+	b.status = "online"
+	b.statusMu.Unlock()
+
+	return nil
+}
+
+// ConnectReplay connects using a JSONL replay file instead of a serial port.
+// The file is replayed with original timing (delta_ms between records).
+func (b *Bridge) ConnectReplay(filePath string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	select {
+	case <-b.stop:
+		b.stop = make(chan struct{})
+		b.publishQueue = make(chan []byte, 100)
+	default:
+	}
+
+	reader, err := OpenReplayReader(filePath)
+	if err != nil {
+		return err
+	}
+	b.reader = reader
+	b.portName = "" // no serial port in replay mode
+
+	statusTopic := fmt.Sprintf("bridges/%s/status", b.id)
+	lwt, _ := json.Marshal(map[string]string{"status": "offline"})
+
+	mqtt := NewMQTTClient(MQTTBroker, b.id, statusTopic, lwt)
+	mqtt.onConnectionLost = b.onConnectionLost
+
+	if err := mqtt.Connect(); err != nil {
+		b.reader.Close()
+		b.reader = nil
+		return err
+	}
+	b.mqtt = mqtt
 
 	online, _ := json.Marshal(map[string]string{"status": "online"})
 	mqtt.PublishRetained(statusTopic, online)
@@ -111,7 +166,7 @@ func (b *Bridge) Start(onData func([]byte)) error {
 	go b.publishLoop()
 	go b.flushLoop()
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, MaxFrameSize)
 	errCount := 0
 
 	for {
@@ -122,18 +177,18 @@ func (b *Bridge) Start(onData func([]byte)) error {
 		}
 
 		b.mu.RLock()
-		serial := b.serial
+		reader := b.reader
 		b.mu.RUnlock()
 
-		if serial == nil {
+		if reader == nil {
 			return fmt.Errorf("disconnected")
 		}
 
-		n, err := serial.Read(buf)
+		n, err := reader.Read(buf)
 		if err != nil {
 			errCount++
 			if errCount > 50 {
-				return fmt.Errorf("serial read failed: %w", err)
+				return fmt.Errorf("read failed: %w", err)
 			}
 			time.Sleep(time.Duration(min(errCount*10, 500)) * time.Millisecond)
 			continue
@@ -183,9 +238,9 @@ func (b *Bridge) Disconnect() error {
 		b.mqtt.Disconnect()
 	}
 
-	if b.serial != nil {
-		b.serial.Close()
-		b.serial = nil
+	if b.reader != nil {
+		b.reader.Close()
+		b.reader = nil
 	}
 
 	b.statusMu.Lock()
@@ -199,7 +254,7 @@ func (b *Bridge) IsHealthy() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.serial == nil || b.mqtt == nil {
+	if b.reader == nil || b.mqtt == nil {
 		return false
 	}
 	return b.mqtt.IsConnected() || b.mqtt.IsReconnecting()
@@ -268,21 +323,21 @@ func (b *Bridge) reconnectSerial(baud int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.serial == nil {
+	if b.reader == nil || b.portName == "" {
 		return nil
 	}
 
 	if b.activityTimer != nil {
 		b.activityTimer.Stop()
 	}
-	b.serial.Close()
+	b.reader.Close()
 
 	serial, err := OpenSerialPort(b.portName, baud)
 	if err != nil {
 		return err
 	}
 
-	b.serial = serial
+	b.reader = serial
 	b.baudRate = baud
 	return nil
 }
