@@ -190,6 +190,7 @@ func runReplayMode(b *bridge.Bridge, replayFile string, sig chan os.Signal) {
 	}
 
 	log.Printf("Replaying from %s (bridge: %s)", replayFile, os.Getenv("BRIDGE_ID"))
+	log.Printf("Connecting to MQTT...")
 
 	if err := b.ConnectReplay(replayFile); err != nil {
 		log.Fatalf("Connect replay failed: %v", err)

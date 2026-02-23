@@ -1,22 +1,15 @@
 package bridge
 
 import (
-	_ "embed"
 	"os"
 	"runtime"
 	"strings"
 )
 
-//go:embed VERSION
-var embeddedVersion string
-
-var Version string // this is set via ldflags
+var Version string // set via ldflags in release builds
 
 func GetVersion() string {
-	if Version != "" {
-		return Version
-	}
-	if v := strings.TrimSpace(embeddedVersion); v != "" {
+	if v := strings.TrimSpace(Version); v != "" {
 		return v
 	}
 	return "dev"

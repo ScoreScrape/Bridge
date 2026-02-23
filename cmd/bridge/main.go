@@ -13,19 +13,22 @@ func main() {
 	gui := os.Getenv("BRIDGE_GUI")
 	id := os.Getenv("BRIDGE_ID")
 
-	if gui == "true" || (gui == "" && id == "") {
+	if id == "" {
+		log.Fatal("BRIDGE_ID required (set in .env or environment)")
+	}
+	if gui == "true" || gui == "" {
 		if !StartGUI() {
 			log.Fatal("GUI not supported in this build")
 		}
 		return
 	}
 
-	if id != "" && gui == "false" {
+	if gui == "false" {
 		runCLI()
 		return
 	}
 
-	log.Fatal("Invalid config: set BRIDGE_ID and BRIDGE_GUI=false for CLI mode")
+	log.Fatal("Set BRIDGE_GUI=false for CLI mode")
 }
 
 func loadEnv(path string) {
