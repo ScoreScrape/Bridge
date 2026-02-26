@@ -134,7 +134,11 @@ func (a *App) build() {
 	a.errorLabel = widget.NewLabel("")
 	a.errorLabel.Wrapping = fyne.TextWrapWord
 	a.errorLabel.TextStyle = fyne.TextStyle{Italic: true}
-	a.errorLabel.Hide()
+
+	// fixed height container so the error area always reserves space and
+	// doesn't shift the layout when an error appears or disappears
+	errorBox := container.NewStack(container.NewVBox(a.errorLabel))
+	errorBox.Resize(fyne.NewSize(0, 40))
 
 	statusRow := container.NewHBox(
 		layout.NewSpacer(),
@@ -158,7 +162,7 @@ func (a *App) build() {
 		container.NewPadded(statusRow),
 		container.NewPadded(widget.NewSeparator()),
 		container.NewPadded(widget.NewCard("Configuration", "", form)),
-		container.NewPadded(a.errorLabel),
+		container.NewPadded(errorBox),
 		container.NewPadded(a.connectBtn),
 		layout.NewSpacer(),
 	))
@@ -216,13 +220,7 @@ func (a *App) connect(id, port string) {
 	// Ensure any previous bridge is fully cleaned up
 	a.cleanupBridge()
 
-	var newErr error
-	a.bridge, newErr = bridge.New(id)
-	if newErr != nil {
-		a.setState(disconnected)
-		a.setError("Invalid Bridge ID format. Must be a valid UUID.")
-		return
-	}
+	a.bridge = bridge.New(id)
 	a.setState(connecting)
 
 	a.bridge.SetConnectionLostHandler(func(err error) {
@@ -380,12 +378,10 @@ func (a *App) setState(s state) {
 
 func (a *App) setError(msg string) {
 	a.errorLabel.SetText("⚠️  " + msg)
-	a.errorLabel.Show()
 }
 
 func (a *App) clearError() {
 	a.errorLabel.SetText("")
-	a.errorLabel.Hide()
 }
 
 func (a *App) formatConnectionError(err error) string {
@@ -494,7 +490,7 @@ func (t *darkTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Colo
 	case theme.ColorNamePlaceHolder, theme.ColorNameDisabled:
 		return color.RGBA{113, 113, 122, 255}
 	}
-	return theme.DefaultTheme().Color(n, v)
+	return theme.DefaultTheme().Color(n, theme.VariantDark)
 }
 
 func (t *darkTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
