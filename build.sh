@@ -3,20 +3,23 @@ set -e
 
 APP_NAME="ScoreScrape Bridge"
 APP_ID="io.scorescrape.bridge"
-VERSION=$(cat VERSION 2>/dev/null || echo "1.0.0")
 
-# Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "Building ${APP_NAME} for macOS..."
+VERSION=$(cat VERSION 2>/dev/null || echo "1.0.0")
 
-# Check for fyne
+# sync VERSION into pkg/bridge for go:embed
+cp VERSION pkg/bridge/VERSION
+
+# copy images for go:embed (can't use symlinks or .. paths)
+cp assets/Icon.png pkg/ui/Icon.png
+cp assets/DarkLogo.png pkg/ui/DarkLogo.png
+
+echo "Building ${APP_NAME} v${VERSION} for macOS..."
+
+# ensure fyne CLI is available
 if ! command -v fyne &> /dev/null; then
-    if ! go env GOPATH &>/dev/null; then
-         echo "Error: GOPATH not set"
-         exit 1
-    fi
     FYNE_CMD="$(go env GOPATH)/bin/fyne"
     if [ ! -f "$FYNE_CMD" ]; then
         echo "Installing fyne CLI..."
@@ -26,17 +29,15 @@ else
     FYNE_CMD="fyne"
 fi
 
-# Remove existing app bundle
 rm -rf "${APP_NAME}.app"
 
-# Build the macOS app
 $FYNE_CMD package --target darwin \
     --app-id "${APP_ID}" \
     --name "${APP_NAME}" \
     --app-version "${VERSION}" \
-    --icon "${SCRIPT_DIR}/pkg/ui/Icon.png" \
+    --icon "${SCRIPT_DIR}/assets/Icon.png" \
     --src cmd/bridge \
     --tags gui \
     --release
 
-echo "✓ macOS app built: ${APP_NAME}.app"
+echo "Built: ${APP_NAME}.app"

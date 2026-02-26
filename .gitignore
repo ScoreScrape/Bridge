@@ -28,6 +28,9 @@ Thumbs.db
 *.out
 go.work
 fyne_metadata_init.go
+pkg/bridge/VERSION
+pkg/ui/Icon.png
+pkg/ui/DarkLogo.png
 
 # Local Docker Build
 *.env

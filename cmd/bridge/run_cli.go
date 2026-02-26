@@ -9,201 +9,164 @@ import (
 	"time"
 )
 
+const (
+	serialPort         = "/dev/ttyUSB0"
+	maxFailures        = 10
+	circuitBreakerWait = 15 * time.Minute
+	healthCheckPeriod  = 30 * time.Second
+)
+
 func runCLI() {
 	bridgeID := os.Getenv("BRIDGE_ID")
 	if bridgeID == "" {
-		log.Fatal("BRIDGE_ID environment variable is required for CLI mode")
+		log.Fatal("BRIDGE_ID required")
 	}
 
-	// Docker default device
-	serialPort := "/dev/ttyUSB0"
-
-	// Check if it exists, if not give the user a semi-helpful error message
 	if _, err := os.Stat(serialPort); os.IsNotExist(err) {
-		log.Printf(`
-Oops! Looks like the serial port is not configured correctly.
-
-In your docker config, make sure the serial port is mapped correctly.
-Make sure to only change the FIRST device path.
-Ex: /dev/<YOUR_SERIAL_PORT>:/dev/ttyUSB0
-`)
-
-		log.Fatal("Serial port configuration error")
+		log.Printf("Serial port %s not found. Check your docker device mapping.", serialPort)
+		log.Fatal("Ex: --device=/dev/YOUR_PORT:/dev/ttyUSB0")
 	}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
 	b := bridge.New(bridgeID)
 
-	// Track rapid disconnections to detect session takeover
-	var lastDisconnectTime time.Time
-	var rapidDisconnectCount int
+	var lastDisconnect time.Time
+	var rapidCount int
 
 	b.SetConnectionLostHandler(func(err error) {
-		now := time.Now()
-
-		// Detect rapid disconnections (likely session takeover)
-		if !lastDisconnectTime.IsZero() && now.Sub(lastDisconnectTime) < 5*time.Second {
-			rapidDisconnectCount++
+		if !lastDisconnect.IsZero() && time.Since(lastDisconnect) < 5*time.Second {
+			rapidCount++
 		} else {
-			rapidDisconnectCount = 0
+			rapidCount = 0
 		}
-		lastDisconnectTime = now
+		lastDisconnect = time.Now()
 
-		if rapidDisconnectCount >= 2 {
-			log.Printf("Connection lost: %v (rapid disconnections detected - possible session takeover, will auto-recover)", err)
+		if rapidCount >= 2 {
+			log.Printf("Connection lost: %v (rapid disconnects - possible session takeover)", err)
 		} else {
-			log.Printf("Connection lost: %v (MQTT will auto-reconnect)", err)
+			log.Printf("Connection lost: %v (will auto-reconnect)", err)
 		}
 	})
 
-	// Enhanced reconnection logic with circuit breaker
-	reconnectDelay := 5 * time.Second    // Start with longer initial delay
-	maxReconnectDelay := 5 * time.Minute // Increase max delay significantly
-	minReconnectDelay := 5 * time.Second
-	consecutiveFailures := 0
-	maxConsecutiveFailures := 10            // Circuit breaker threshold
-	circuitBreakerDelay := 15 * time.Minute // Long delay when circuit is open
-	lastSuccessTime := time.Now()
+	backoff := newBackoff()
 
 	for {
-		// Circuit breaker: if too many consecutive failures, wait longer
-		if consecutiveFailures >= maxConsecutiveFailures {
-			log.Printf("Circuit breaker activated after %d consecutive failures. Waiting %v before retry...",
-				consecutiveFailures, circuitBreakerDelay)
-
-			select {
-			case <-sigChan:
-				log.Println("Shutdown signal received")
+		if backoff.failures >= maxFailures {
+			log.Printf("Circuit breaker: %d failures, waiting %v", backoff.failures, circuitBreakerWait)
+			if waitOrSignal(sig, circuitBreakerWait) {
 				return
-			case <-time.After(circuitBreakerDelay):
-				// Reset failure count when circuit breaker timeout expires
-				consecutiveFailures = 0
-				reconnectDelay = minReconnectDelay
 			}
+			backoff.reset()
 		}
 
-		log.Printf("Connecting to serial port %s (bridge ID: %s)... (attempt %d)",
-			serialPort, bridgeID, consecutiveFailures+1)
+		log.Printf("Connecting to %s (bridge: %s, attempt %d)", serialPort, bridgeID, backoff.failures+1)
 
 		if err := b.Connect(serialPort, bridge.DefaultBaudRate); err != nil {
-			consecutiveFailures++
-			log.Printf("Connection failed: %v (failure %d/%d)", err, consecutiveFailures, maxConsecutiveFailures)
-
-			// Don't log retry message if circuit breaker will activate
-			if consecutiveFailures < maxConsecutiveFailures {
-				log.Printf("Retrying in %v...", reconnectDelay)
+			backoff.fail()
+			log.Printf("Connect failed: %v", err)
+			if backoff.failures < maxFailures {
+				log.Printf("Retry in %v", backoff.delay)
 			}
-
-			select {
-			case <-sigChan:
-				log.Println("Shutdown signal received")
+			if waitOrSignal(sig, backoff.delay) {
 				return
-			case <-time.After(reconnectDelay):
-				// Exponential backoff with jitter
-				reconnectDelay = time.Duration(float64(reconnectDelay) * 1.5)
-				if reconnectDelay > maxReconnectDelay {
-					reconnectDelay = maxReconnectDelay
-				}
-				continue
 			}
+			continue
 		}
 
-		// Connection successful - reset failure tracking
-		log.Println("Connected successfully")
-		consecutiveFailures = 0
-		reconnectDelay = minReconnectDelay
-		lastSuccessTime = time.Now()
+		log.Println("Connected")
+		backoff.reset()
+		connectTime := time.Now()
 
-		errChan := make(chan error, 1)
-
+		done := make(chan error, 1)
 		go func() {
-			err := b.Start(nil, func(msg string) {
-				log.Println(msg)
-			})
-			errChan <- err
+			done <- b.Start(nil)
 		}()
 
-		// Health check ticker to monitor MQTT connection
-		healthTicker := time.NewTicker(30 * time.Second)
-		defer healthTicker.Stop()
+		health := time.NewTicker(healthCheckPeriod)
 
-		// Main event loop - handle shutdown, errors, and health checks
+	loop:
 		for {
 			select {
-			case <-sigChan:
+			case <-sig:
 				log.Println("Shutting down...")
 				b.Disconnect()
-				time.Sleep(500 * time.Millisecond)
-				log.Println("Bridge stopped")
+				health.Stop()
 				return
-			case <-healthTicker.C:
-				// Check if MQTT is stuck in a failed reconnection state
+
+			case <-health.C:
 				if b.IsMQTTReconnecting() {
-					duration, attempts := b.GetMQTTReconnectionInfo()
-					// If MQTT has been trying to reconnect for more than 5 minutes, force full restart
-					if duration > 5*time.Minute {
-						log.Printf("MQTT reconnection stuck after %v (%d attempts). Forcing full reconnection...", duration, attempts)
-						errChan <- nil // Trigger reconnection
-						goto reconnectLoop
-					} else if attempts > 0 {
-						log.Printf("MQTT reconnecting... (disconnected for %v, %d attempts)", duration, attempts)
+					dur, attempts := b.GetMQTTReconnectionInfo()
+					if dur > 5*time.Minute {
+						log.Printf("MQTT stuck reconnecting (%v, %d attempts), forcing restart", dur, attempts)
+						break loop
+					}
+					if attempts > 0 {
+						log.Printf("MQTT reconnecting (%v, %d attempts)", dur, attempts)
 					}
 				} else if !b.IsHealthy() {
-					// Bridge is unhealthy and not reconnecting - force restart
-					log.Println("Bridge unhealthy (MQTT not connected and not reconnecting). Forcing reconnection...")
-					errChan <- nil
-					goto reconnectLoop
+					log.Println("Bridge unhealthy, forcing restart")
+					break loop
 				}
-			case err := <-errChan:
-				connectionDuration := time.Since(lastSuccessTime)
 
+			case err := <-done:
+				uptime := time.Since(connectTime)
 				if err != nil {
-					log.Printf("Bridge error after %v: %v", connectionDuration, err)
+					log.Printf("Bridge error after %v: %v", uptime, err)
 				}
-
 				b.Disconnect()
 
-				// If connection was very short-lived, treat as failure
-				if connectionDuration < 30*time.Second {
-					consecutiveFailures++
-					log.Printf("Short-lived connection detected (%v), treating as failure %d/%d",
-						connectionDuration, consecutiveFailures, maxConsecutiveFailures)
-				} else {
-					// Connection lasted reasonable time, reset some failure tracking
-					if consecutiveFailures > 0 {
-						consecutiveFailures = max(0, consecutiveFailures-1)
-					}
+				if uptime < 30*time.Second {
+					backoff.fail()
+					log.Printf("Short connection (%v), failure %d/%d", uptime, backoff.failures, maxFailures)
+				} else if backoff.failures > 0 {
+					backoff.failures--
 				}
 
-				// Add minimum delay before reconnection to prevent tight loops
-				minWait := 2 * time.Second
-				if consecutiveFailures > 3 {
-					minWait = 10 * time.Second
+				wait := 2 * time.Second
+				if backoff.failures > 3 {
+					wait = 10 * time.Second
 				}
-
-				log.Printf("Waiting %v before reconnection attempt...", minWait)
-				select {
-				case <-sigChan:
-					log.Println("Shutdown signal received")
+				if waitOrSignal(sig, wait) {
+					health.Stop()
 					return
-				case <-time.After(minWait):
-					// Break out of inner loop to attempt reconnection
-					goto reconnectLoop
 				}
+				break loop
 			}
 		}
-
-	reconnectLoop:
-		// Continue to outer loop for reconnection
+		health.Stop()
 	}
 }
 
-// Helper function for max (Go 1.21+)
-func max(a, b int) int {
-	if a > b {
-		return a
+type backoff struct {
+	delay    time.Duration
+	failures int
+}
+
+func newBackoff() *backoff {
+	return &backoff{delay: 5 * time.Second}
+}
+
+func (b *backoff) fail() {
+	b.failures++
+	b.delay = time.Duration(float64(b.delay) * 1.5)
+	if b.delay > 5*time.Minute {
+		b.delay = 5 * time.Minute
 	}
-	return b
+}
+
+func (b *backoff) reset() {
+	b.delay = 5 * time.Second
+	b.failures = 0
+}
+
+func waitOrSignal(sig chan os.Signal, d time.Duration) bool {
+	select {
+	case <-sig:
+		log.Println("Shutdown signal received")
+		return true
+	case <-time.After(d):
+		return false
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bridge/pkg/bridge"
 	"bytes"
 	_ "embed"
+	"fmt"
 	"image/color"
 	"sync"
 	"time"
@@ -18,359 +19,480 @@ import (
 )
 
 //go:embed Icon.png
-var IconBytes []byte
+var iconBytes []byte
 
 //go:embed DarkLogo.png
-var DarkLogoBytes []byte
+var logoBytes []byte
 
-type ConnectionState int
-
-const (
-	StateDisconnected ConnectionState = iota
-	StateConnecting
-	StateConnected
-	StateError
+var (
+	gray   = color.RGBA{100, 100, 100, 255}
+	green  = color.RGBA{34, 197, 94, 255}
+	red    = color.RGBA{239, 68, 68, 255}
+	purple = color.RGBA{103, 103, 228, 255}
 )
 
+type state int
+
+const (
+	disconnected state = iota
+	connecting
+	connected
+	errored
+	reconnecting
+)
+
+var stateColors = map[state]color.Color{
+	disconnected: gray,
+	connecting:   purple,
+	connected:    green,
+	errored:      red,
+	reconnecting: color.RGBA{251, 191, 36, 255}, // amber/orange
+}
+
+var stateLabels = map[state]string{
+	disconnected: "DISCONNECTED",
+	connecting:   "CONNECTING",
+	connected:    "CONNECTED",
+	errored:      "ERROR",
+	reconnecting: "RECONNECTING",
+}
+
 type App struct {
-	fyneApp       fyne.App
-	window        fyne.Window
-	bridge        *bridge.Bridge
-	portSelect    *widget.Select
-	bridgeIDEntry *widget.Entry
-	connectBtn    *widget.Button
-	statusLabel   *canvas.Text
-	statusDot     *canvas.Circle
-	rxIndicator   *canvas.Circle
-	leftContent   *fyne.Container
-	portLabel     *widget.Label
-	portContainer *fyne.Container
-	state         ConnectionState
-	stateMutex    sync.Mutex
-	rxTimer       *time.Timer
-	rxTimerMutex  sync.Mutex
-	connecting    bool // Prevents double-click issues
+	fyne   fyne.App
+	window fyne.Window
+	bridge *bridge.Bridge
+
+	portSelect *widget.Select
+	idEntry    *widget.Entry
+	connectBtn *widget.Button
+	statusDot  *canvas.Circle
+	statusText *canvas.Text
+	rxDot      *canvas.Circle
+	errorLabel *widget.Label
+
+	mu                sync.Mutex
+	state             state
+	busy              bool
+	rxTimer           *time.Timer
+	reconnectAttempts int
 }
 
 func NewApp() *App {
 	a := app.NewWithID("io.scorescrape.bridge")
-	a.Settings().SetTheme(&ShadcnTheme{})
+	a.Settings().SetTheme(&darkTheme{})
+
 	w := a.NewWindow("ScoreScrape Bridge")
 	w.Resize(fyne.NewSize(380, 420))
 	w.CenterOnScreen()
 	w.SetFixedSize(true)
-	if len(IconBytes) > 0 {
-		icon := fyne.NewStaticResource("Icon.png", IconBytes)
+
+	if len(iconBytes) > 0 {
+		icon := fyne.NewStaticResource("Icon.png", iconBytes)
 		a.SetIcon(icon)
 		w.SetIcon(icon)
 	}
-	ui := &App{fyneApp: a, window: w, state: StateDisconnected}
-	ui.buildUI()
+
+	ui := &App{fyne: a, window: w}
+	ui.build()
 	return ui
 }
 
 func (a *App) Run() {
-	a.loadPreferences()
+	a.idEntry.SetText(a.fyne.Preferences().String("bridge_id"))
 	a.refreshPorts()
 	a.window.ShowAndRun()
 }
 
-func (a *App) buildUI() {
-	logo := canvas.NewImageFromReader(bytes.NewReader(DarkLogoBytes), "logo.png")
+func (a *App) build() {
+	logo := canvas.NewImageFromReader(bytes.NewReader(logoBytes), "logo.png")
 	logo.FillMode = canvas.ImageFillContain
 	logo.SetMinSize(fyne.NewSize(180, 45))
 
-	a.statusDot = canvas.NewCircle(color.RGBA{100, 100, 100, 255})
+	a.statusDot = canvas.NewCircle(gray)
 	a.statusDot.Resize(fyne.NewSize(10, 10))
-	a.rxIndicator = canvas.NewCircle(color.RGBA{100, 100, 100, 255})
-	a.rxIndicator.Resize(fyne.NewSize(8, 8))
 
-	a.statusLabel = canvas.NewText("DISCONNECTED", color.RGBA{150, 150, 150, 255})
-	a.statusLabel.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
-	a.statusLabel.TextSize = 12
+	a.statusText = canvas.NewText("DISCONNECTED", gray)
+	a.statusText.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
+	a.statusText.TextSize = 12
 
-	a.portSelect = widget.NewSelect([]string{}, nil)
+	a.rxDot = canvas.NewCircle(gray)
+	a.rxDot.Resize(fyne.NewSize(8, 8))
+
+	a.portSelect = widget.NewSelect(nil, nil)
 	a.portSelect.PlaceHolder = "Select Serial Port..."
-	a.portLabel = widget.NewLabel("")
-	a.portLabel.TextStyle = fyne.TextStyle{Bold: true}
-	a.portLabel.Alignment = fyne.TextAlignCenter
-	a.portLabel.Hide()
-	a.portContainer = container.NewMax(a.portSelect, container.NewCenter(a.portLabel))
 
-	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { a.refreshPorts() })
-	refreshBtn.Importance = widget.MediumImportance
+	refresh := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { a.refreshPorts() })
+	refresh.Importance = widget.MediumImportance
 
-	a.bridgeIDEntry = widget.NewEntry()
-	a.bridgeIDEntry.PlaceHolder = "Paste Bridge ID"
+	a.idEntry = widget.NewEntry()
+	a.idEntry.PlaceHolder = "Paste Bridge ID"
 
-	a.connectBtn = widget.NewButton("Connect Bridge", func() { a.toggleConnection() })
+	a.connectBtn = widget.NewButton("Connect Bridge", a.toggle)
 	a.connectBtn.SetIcon(theme.LoginIcon())
 	a.connectBtn.Importance = widget.HighImportance
 
-	// Improved spacing and layout
+	a.errorLabel = widget.NewLabel("")
+	a.errorLabel.Wrapping = fyne.TextWrapWord
+	a.errorLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	// fixed height container so the error area always reserves space and
+	// doesn't shift the layout when an error appears or disappears
+	errorBox := container.NewStack(container.NewVBox(a.errorLabel))
+	errorBox.Resize(fyne.NewSize(0, 40))
+
 	statusRow := container.NewHBox(
 		layout.NewSpacer(),
 		container.NewPadded(a.statusDot),
-		container.NewPadded(a.statusLabel),
-		container.NewPadded(a.rxIndicator),
+		container.NewPadded(a.statusText),
+		container.NewPadded(a.rxDot),
 		container.NewPadded(widget.NewLabel("RX")),
 		layout.NewSpacer(),
 	)
 
 	form := container.NewVBox(
 		widget.NewLabelWithStyle("SERIAL PORT", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewBorder(nil, nil, nil, refreshBtn, a.portContainer),
+		container.NewBorder(nil, nil, nil, refresh, a.portSelect),
 		container.NewPadded(widget.NewLabel("")),
 		widget.NewLabelWithStyle("BRIDGE ID", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		a.bridgeIDEntry,
+		a.idEntry,
 	)
 
-	card := widget.NewCard("Configuration", "", form)
-
-	a.leftContent = container.NewVBox(
+	a.window.SetContent(container.NewVBox(
 		container.NewPadded(logo),
 		container.NewPadded(statusRow),
 		container.NewPadded(widget.NewSeparator()),
-		container.NewPadded(card),
+		container.NewPadded(widget.NewCard("Configuration", "", form)),
+		container.NewPadded(errorBox),
 		container.NewPadded(a.connectBtn),
 		layout.NewSpacer(),
-	)
-	a.window.SetContent(a.leftContent)
+	))
 }
 
-func (a *App) getState() ConnectionState {
-	a.stateMutex.Lock()
-	defer a.stateMutex.Unlock()
-	return a.state
+func (a *App) refreshPorts() {
+	go func() {
+		ports, _ := bridge.GetAvailablePorts()
+		a.portSelect.SetOptions(ports)
+	}()
 }
 
-func (a *App) updateState(s ConnectionState) {
-	a.stateMutex.Lock()
-	a.state = s
-	a.stateMutex.Unlock()
+func (a *App) toggle() {
+	a.mu.Lock()
+	s := a.state
+	busy := a.busy
+	a.mu.Unlock()
 
-	colors := map[ConnectionState]color.Color{
-		StateDisconnected: color.RGBA{100, 100, 100, 255},
-		StateConnected:    color.RGBA{34, 197, 94, 255},
-		StateError:        color.RGBA{239, 68, 68, 255},
-		StateConnecting:   color.RGBA{103, 103, 228, 255},
-	}
-	texts := map[ConnectionState]string{
-		StateDisconnected: "DISCONNECTED",
-		StateConnected:    "CONNECTED",
-		StateError:        "ERROR",
-		StateConnecting:   "CONNECTING",
-	}
-
-	// Batch UI updates to avoid multiple refreshes
-	a.statusDot.FillColor = colors[s]
-	a.statusLabel.Text = texts[s]
-	a.statusLabel.Color = colors[s]
-
-	// Single refresh call for better performance
-	a.statusDot.Refresh()
-	a.statusLabel.Refresh()
-	a.updateButtonState()
-}
-
-func (a *App) updateButtonState() {
-	if a.connectBtn == nil {
+	if s == connected || s == connecting || s == reconnecting {
+		go a.disconnect()
 		return
 	}
 
-	state := a.getState()
+	if busy {
+		return
+	}
 
-	// Fyne widgets are thread-safe, can update directly
-	if state == StateConnected || state == StateConnecting {
+	a.mu.Lock()
+	a.busy = true
+	a.mu.Unlock()
+
+	go a.connect(a.idEntry.Text, a.portSelect.Selected)
+}
+
+func (a *App) connect(id, port string) {
+	defer func() {
+		a.mu.Lock()
+		a.busy = false
+		a.mu.Unlock()
+	}()
+
+	if id == "" {
+		a.setError("Please enter a Bridge ID")
+		return
+	}
+	if port == "" {
+		a.setError("Please select a serial port")
+		return
+	}
+
+	a.clearError()
+	a.fyne.Preferences().SetString("bridge_id", id)
+	a.fyne.Preferences().SetString("serial_port", port)
+
+	// Ensure any previous bridge is fully cleaned up
+	a.cleanupBridge()
+
+	a.bridge = bridge.New(id)
+	a.setState(connecting)
+
+	a.bridge.SetConnectionLostHandler(func(err error) {
+		// Don't auto-reconnect if another bridge with same ID is already connected
+		if err != nil && contains(err.Error(), "EOF") {
+			errMsg := a.formatConnectionError(err)
+			a.cleanupBridge()
+			a.setState(disconnected)
+			a.setError(errMsg)
+			return
+		}
+
+		// mqtt handles auto reconnecting
+		// show reconnecting state in the gui
+		a.setState(reconnecting)
+		a.setError(a.formatConnectionError(err))
+	})
+
+	// When MQTT is actively trying to reconnect, keep the GUI updated
+	a.bridge.SetMQTTReconnectingHandler(func(attempts int) {
+		a.mu.Lock()
+		s := a.state
+		a.mu.Unlock()
+		if s == reconnecting {
+			a.setError(fmt.Sprintf("Reconnecting to MQTT (attempt %d)...", attempts))
+		}
+	})
+
+	// When MQTT successfully reconnects, restore the GUI to connected state
+	a.bridge.SetMQTTReconnectedHandler(func() {
+		a.mu.Lock()
+		a.reconnectAttempts = 0
+		a.mu.Unlock()
+		a.setState(connected)
+		a.clearError()
+	})
+
+	if err := a.bridge.Connect(port, 9600); err != nil {
+		errMsg := a.formatConnectionError(err)
+		a.cleanupBridge()
+		a.setState(disconnected)
+		a.setError(errMsg)
+
+		a.mu.Lock()
+		a.reconnectAttempts = 0
+		a.mu.Unlock()
+		return
+	}
+
+	a.mu.Lock()
+	a.reconnectAttempts = 0
+	a.mu.Unlock()
+
+	a.setState(connected)
+
+	err := a.bridge.Start(func(d []byte) { a.onRx() })
+
+	a.mu.Lock()
+	s := a.state
+	a.mu.Unlock()
+
+	if err != nil && s == connected {
+		// Don't auto-reconnect if another bridge with same ID is already connected
+		if contains(err.Error(), "EOF") {
+			errMsg := a.formatConnectionError(err)
+			a.cleanupBridge()
+			a.setState(disconnected)
+			a.setError(errMsg)
+			return
+		}
+
+		// for other errors like serial read failures the bridge.Start loop
+		// already exited, so we need to fully reconnect
+		a.mu.Lock()
+		a.reconnectAttempts++
+		attempts := a.reconnectAttempts
+		a.mu.Unlock()
+
+		if attempts <= 2 {
+			a.setState(reconnecting)
+			a.setError(a.formatConnectionError(err))
+			a.reconnect(id, port)
+		} else {
+			errMsg := a.formatConnectionError(err)
+			a.cleanupBridge()
+			a.setState(disconnected)
+			a.setError(errMsg + " (reconnection failed after 2 attempts)")
+		}
+	}
+}
+
+func (a *App) cleanupBridge() {
+	if a.bridge != nil {
+		a.bridge.Disconnect()
+		// Give the serial port time to fully close
+		time.Sleep(100 * time.Millisecond)
+		a.bridge = nil
+	}
+	a.resetRx()
+}
+
+func (a *App) disconnect() {
+	a.cleanupBridge()
+	a.setState(disconnected)
+	a.clearError()
+}
+
+func (a *App) reconnect(id, port string) {
+	a.mu.Lock()
+	s := a.state
+	a.mu.Unlock()
+
+	if s != reconnecting {
+		return
+	}
+
+	time.Sleep(2 * time.Second)
+
+	a.mu.Lock()
+	s = a.state
+	a.mu.Unlock()
+
+	if s == reconnecting {
+		go a.connect(id, port)
+	}
+}
+
+func (a *App) setState(s state) {
+	a.mu.Lock()
+	a.state = s
+	a.mu.Unlock()
+
+	c := stateColors[s]
+	a.statusDot.FillColor = c
+	a.statusText.Text = stateLabels[s]
+	a.statusText.Color = c
+	a.statusDot.Refresh()
+	a.statusText.Refresh()
+
+	if s == connected || s == connecting || s == reconnecting {
 		a.connectBtn.SetText("Disconnect Bridge")
 		a.connectBtn.SetIcon(theme.LogoutIcon())
-		// Low importance for disconnect action (grey color)
 		a.connectBtn.Importance = widget.LowImportance
 	} else {
 		a.connectBtn.SetText("Connect Bridge")
 		a.connectBtn.SetIcon(theme.LoginIcon())
-		// High importance for primary action (blue/green color)
 		a.connectBtn.Importance = widget.HighImportance
 	}
-	// Refresh button to ensure visual changes take effect
 	a.connectBtn.Refresh()
+
+	if s == connected {
+		a.clearError()
+	}
 }
 
-func (a *App) refreshPorts() {
-	// Run port refresh in background to avoid blocking UI
-	go func() {
-		ports, _ := bridge.GetAvailablePorts()
-		// Fyne widgets are thread-safe
-		if a.portSelect != nil {
-			a.portSelect.SetOptions(ports)
+func (a *App) setError(msg string) {
+	a.errorLabel.SetText("⚠️  " + msg)
+}
+
+func (a *App) clearError() {
+	a.errorLabel.SetText("")
+}
+
+func (a *App) formatConnectionError(err error) string {
+	errMsg := err.Error()
+
+	// MQTT duplicate connection (EOF means another bridge with same ID is connected)
+	if contains(errMsg, "EOF") {
+		return "Another bridge with this ID is already connected. Disconnect it first or use a different Bridge ID."
+	}
+
+	// Serial port errors
+	if contains(errMsg, "busy") || contains(errMsg, "in use") {
+		return "Serial port is busy. Wait a moment and try again."
+	}
+	if contains(errMsg, "permission denied") || contains(errMsg, "access is denied") {
+		return "Cannot access serial port. Try closing other apps using this port."
+	}
+	if contains(errMsg, "no such file") || contains(errMsg, "cannot find the file") {
+		return "Serial port not found. Please refresh and select a valid port."
+	}
+	if contains(errMsg, "device not configured") || contains(errMsg, "port is not open") {
+		return "Serial port is not available. Check if device is connected."
+	}
+
+	// MQTT errors
+	if contains(errMsg, "network is unreachable") || contains(errMsg, "no route to host") {
+		return "No internet connection. Check your network settings."
+	}
+	if contains(errMsg, "connection refused") {
+		return "Cannot reach MQTT broker. Check your internet connection."
+	}
+	if contains(errMsg, "timeout") || contains(errMsg, "timed out") {
+		return "Connection timeout. Check your internet connection."
+	}
+	if contains(errMsg, "not authorized") || contains(errMsg, "bad user name or password") {
+		return "Authentication failed. Check your Bridge ID."
+	}
+
+	// Generic fallback
+	return "Connection failed: " + errMsg
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
 		}
-	}()
+	}
+	return false
 }
 
-func (a *App) loadPreferences() {
-	a.bridgeIDEntry.SetText(a.fyneApp.Preferences().String("bridge_id"))
-}
+func (a *App) onRx() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-func (a *App) toggleConnection() {
-	a.stateMutex.Lock()
-	currentState := a.state
-
-	// If we're connected/connecting, allow disconnect regardless of connecting flag
-	if currentState == StateConnected || currentState == StateConnecting {
-		a.stateMutex.Unlock()
-		// Disconnect in background to avoid blocking UI
-		go func() {
-			if a.bridge != nil {
-				a.bridge.Disconnect()
-				a.bridge = nil
-			}
-			a.resetRxIndicator()
-			a.stateMutex.Lock()
-			a.connecting = false
-			a.stateMutex.Unlock()
-			a.updateState(StateDisconnected)
-		}()
-		return
-	}
-
-	// Prevent double-clicking connect
-	if a.connecting {
-		a.stateMutex.Unlock()
-		return
-	}
-	a.connecting = true
-	a.stateMutex.Unlock()
-
-	go func() {
-		a.connectAndRun(a.bridgeIDEntry.Text, a.portSelect.Selected)
-		// Note: connecting flag is cleared when Start() returns or on error
-	}()
-}
-
-func (a *App) connectAndRun(id, port string) {
-	if id == "" || port == "" {
-		a.stateMutex.Lock()
-		a.connecting = false
-		a.stateMutex.Unlock()
-		a.updateState(StateError)
-		return
-	}
-	a.fyneApp.Preferences().SetString("bridge_id", id)
-	a.fyneApp.Preferences().SetString("serial_port", port)
-
-	a.bridge = bridge.New(id)
-	a.updateState(StateConnecting)
-
-	a.bridge.SetConnectionLostHandler(func(err error) {
-		a.updateState(StateError)
-		a.reconnect(id, port)
-	})
-
-	if err := a.bridge.Connect(port, 9600); err != nil {
-		a.stateMutex.Lock()
-		a.connecting = false
-		a.stateMutex.Unlock()
-		a.updateState(StateError)
-		return
-	}
-
-	// Connection established - clear connecting flag before blocking on Start()
-	a.stateMutex.Lock()
-	a.connecting = false
-	a.stateMutex.Unlock()
-	a.updateState(StateConnected)
-
-	err := a.bridge.Start(func(d []byte) {
-		a.onRxData()
-	}, func(m string) {
-		// Logging disabled - app is simplified to just send data
-	})
-
-	if err != nil && a.getState() == StateConnected {
-		a.updateState(StateError)
-		a.reconnect(id, port)
-	}
-}
-
-func (a *App) reconnect(id, port string) {
-	if a.getState() != StateError {
-		return
-	}
-	time.Sleep(2 * time.Second)
-	if a.getState() == StateError {
-		go a.connectAndRun(id, port)
-	}
-}
-
-func (a *App) onRxData() {
-	a.rxTimerMutex.Lock()
-	defer a.rxTimerMutex.Unlock()
-
-	// Stop existing timer if it exists
 	if a.rxTimer != nil {
 		a.rxTimer.Stop()
 	}
 
-	// Only update indicator if it's not already green (avoid unnecessary refreshes)
-	if a.rxIndicator.FillColor != (color.RGBA{34, 197, 94, 255}) {
-		a.rxIndicator.FillColor = color.RGBA{34, 197, 94, 255}
-		a.rxIndicator.Refresh()
+	if a.rxDot.FillColor != green {
+		a.rxDot.FillColor = green
+		a.rxDot.Refresh()
 	}
 
-	// Create a new timer that will turn off the indicator after 3 seconds
 	a.rxTimer = time.AfterFunc(3*time.Second, func() {
-		a.rxTimerMutex.Lock()
-		defer a.rxTimerMutex.Unlock()
-		// Turn off RX indicator (gray)
-		a.rxIndicator.FillColor = color.RGBA{100, 100, 100, 255}
-		a.rxIndicator.Refresh()
+		a.mu.Lock()
+		a.rxDot.FillColor = gray
+		a.rxDot.Refresh()
 		a.rxTimer = nil
+		a.mu.Unlock()
 	})
 }
 
-func (a *App) resetRxIndicator() {
-	a.rxTimerMutex.Lock()
-	defer a.rxTimerMutex.Unlock()
+func (a *App) resetRx() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	// Stop timer if it exists
 	if a.rxTimer != nil {
 		a.rxTimer.Stop()
 		a.rxTimer = nil
 	}
-
-	// Reset RX indicator to gray - Fyne handles thread safety
-	a.rxIndicator.FillColor = color.RGBA{100, 100, 100, 255}
-	a.rxIndicator.Refresh()
+	a.rxDot.FillColor = gray
+	a.rxDot.Refresh()
 }
 
-// shadcn theme
-type ShadcnTheme struct{}
+type darkTheme struct{}
 
-func (t *ShadcnTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
-	black := color.RGBA{0, 0, 0, 255}
-	secondary := color.RGBA{103, 103, 228, 255}
-	zinc50 := color.RGBA{250, 250, 250, 255}
-	zinc800 := color.RGBA{39, 39, 42, 255}
-	zinc900 := color.RGBA{24, 24, 27, 255}
+func (t *darkTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 	switch n {
 	case theme.ColorNameBackground:
-		return black
+		return color.Black
 	case theme.ColorNameForeground:
-		return zinc50
+		return color.RGBA{250, 250, 250, 255}
 	case theme.ColorNamePrimary:
-		return secondary
+		return purple
 	case theme.ColorNameButton:
-		return zinc800
+		return color.RGBA{39, 39, 42, 255}
 	case theme.ColorNameInputBackground:
-		return zinc900
-	case theme.ColorNamePlaceHolder:
-		return color.RGBA{113, 113, 122, 255}
-	case theme.ColorNameDisabled:
+		return color.RGBA{24, 24, 27, 255}
+	case theme.ColorNamePlaceHolder, theme.ColorNameDisabled:
 		return color.RGBA{113, 113, 122, 255}
 	}
-	return theme.DefaultTheme().Color(n, v)
+	return theme.DefaultTheme().Color(n, theme.VariantDark)
 }
 
-func (t *ShadcnTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
-func (t *ShadcnTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
-func (t *ShadcnTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
+func (t *darkTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (t *darkTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (t *darkTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
