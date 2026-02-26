@@ -24,9 +24,9 @@ type Bridge struct {
 	status        string
 	activityTimer *time.Timer
 
-	publishQueue     chan []byte
-	stop             chan struct{}
-	onConnectionLost func(error)
+	publishQueue       chan []byte
+	stop               chan struct{}
+	onConnectionLost   func(error)
 	onMQTTReconnecting func(int)
 	onMQTTReconnected  func()
 }
