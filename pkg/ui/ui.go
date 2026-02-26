@@ -216,7 +216,13 @@ func (a *App) connect(id, port string) {
 	// Ensure any previous bridge is fully cleaned up
 	a.cleanupBridge()
 
-	a.bridge = bridge.New(id)
+	var newErr error
+	a.bridge, newErr = bridge.New(id)
+	if newErr != nil {
+		a.setState(disconnected)
+		a.setError("Invalid Bridge ID format. Must be a valid UUID.")
+		return
+	}
 	a.setState(connecting)
 
 	a.bridge.SetConnectionLostHandler(func(err error) {

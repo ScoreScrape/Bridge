@@ -30,7 +30,10 @@ func runCLI() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	b := bridge.New(bridgeID)
+	b, err := bridge.New(bridgeID)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	var lastDisconnect time.Time
 	var rapidCount int
