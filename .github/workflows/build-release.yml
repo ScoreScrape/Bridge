@@ -90,10 +90,20 @@ jobs:
               --tags gui \
               --release
 
-            # find the app bundle
+            # find the app bundle, ad-hoc sign it, then zip
             for d in "ScoreScrape Bridge.app" "cmd/bridge/ScoreScrape Bridge.app"; do
               if [ -d "$d" ]; then
+                # Ad-hoc code sign — required for Apple Silicon, and
+                # lets Intel users right-click → Open without "damaged" errors
+                codesign --force --deep --sign - "$d"
+
+                # Copy with ditto to preserve extended attributes
                 ditto "$d" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
+
+                # Create a zip for release (ditto zip preserves resource forks/attrs)
+                ditto -c -k --sequesterRsrc --keepParent \
+                  "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app" \
+                  "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.zip"
                 break
               fi
             done
@@ -105,6 +115,7 @@ jobs:
           path: |
             ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe
             ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app
+            ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.zip
           if-no-files-found: ignore
           retention-days: 30
 
@@ -129,11 +140,7 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f -name "*.exe" -exec cp {} release-assets/ \;
-          find artifacts -type d -name "*.app" | while read app; do
-            name=$(basename "$app")
-            cp -r "$app" release-assets/
-            (cd release-assets && zip -r "${name}.zip" "$name")
-          done
+          find artifacts -type f -name "*.zip" -exec cp {} release-assets/ \;
 
       - name: Release notes
         run: |
@@ -146,16 +153,30 @@ jobs:
             COMMITS=$(git log --pretty=format:"- %s" --no-merges ${PREV}..HEAD)
           fi
 
-          cat > release-notes.md << EOF
-          ## ScoreScrape Bridge $VERSION
+          cat > release-notes.md << 'EOF'
+          ## ScoreScrape Bridge VERSION_PLACEHOLDER
 
           ### Downloads
-          - Windows (64-bit): .exe
-          - macOS Intel (64-bit): .app
+          - **Windows** (64-bit): `.exe`
+          - **macOS** Intel (64-bit): `.zip` (extract the `.app`)
+
+          ### macOS — First Launch
+          Since this app is not signed with an Apple Developer certificate, macOS will block it on first open. To fix this:
+
+          **Option A (easiest):** Right-click the app → click **Open** → click **Open** again in the dialog.
+
+          **Option B (terminal):** Run this after extracting the zip:
+          ```
+          xattr -cr "ScoreScrape Bridge.app"
+          ```
+          Then open the app normally. You only need to do this once.
 
           ### Changes
-          $COMMITS
+          COMMITS_PLACEHOLDER
           EOF
+
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/" release-notes.md
+          sed -i "s|COMMITS_PLACEHOLDER|$COMMITS|" release-notes.md
 
       - uses: softprops/action-gh-release@v1
         with:
