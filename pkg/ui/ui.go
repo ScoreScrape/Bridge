@@ -4,6 +4,7 @@ import (
 	"bridge/pkg/bridge"
 	"bytes"
 	_ "embed"
+	"fmt"
 	"image/color"
 	"sync"
 	"time"
@@ -228,21 +229,29 @@ func (a *App) connect(id, port string) {
 			return
 		}
 
-		a.mu.Lock()
-		a.reconnectAttempts++
-		attempts := a.reconnectAttempts
-		a.mu.Unlock()
+		// mqtt handles auto reconnecting
+		// show reconnecting state in the gui
+		a.setState(reconnecting)
+		a.setError(a.formatConnectionError(err))
+	})
 
-		if attempts <= 2 {
-			a.setState(reconnecting)
-			a.setError(a.formatConnectionError(err))
-			a.reconnect(id, port)
-		} else {
-			errMsg := a.formatConnectionError(err)
-			a.cleanupBridge()
-			a.setState(disconnected)
-			a.setError(errMsg + " (reconnection failed after 2 attempts)")
+	// When MQTT is actively trying to reconnect, keep the GUI updated
+	a.bridge.SetMQTTReconnectingHandler(func(attempts int) {
+		a.mu.Lock()
+		s := a.state
+		a.mu.Unlock()
+		if s == reconnecting {
+			a.setError(fmt.Sprintf("Reconnecting to MQTT (attempt %d)...", attempts))
 		}
+	})
+
+	// When MQTT successfully reconnects, restore the GUI to connected state
+	a.bridge.SetMQTTReconnectedHandler(func() {
+		a.mu.Lock()
+		a.reconnectAttempts = 0
+		a.mu.Unlock()
+		a.setState(connected)
+		a.clearError()
 	})
 
 	if err := a.bridge.Connect(port, 9600); err != nil {
@@ -279,6 +288,8 @@ func (a *App) connect(id, port string) {
 			return
 		}
 
+		// for other errors like serial read failures the bridge.Start loop
+		// already exited, so we need to fully reconnect
 		a.mu.Lock()
 		a.reconnectAttempts++
 		attempts := a.reconnectAttempts

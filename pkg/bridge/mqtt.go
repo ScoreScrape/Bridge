@@ -17,6 +17,8 @@ const MQTTBroker = "mqtts://broker.scorescrape.io:8883"
 type MQTTClient struct {
 	client           mqtt.Client
 	onConnectionLost func(error)
+	onReconnect      func()
+	onReconnecting   func(int)
 
 	mu                sync.RWMutex
 	disconnectTime    time.Time
@@ -63,6 +65,10 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 		attempts := m.reconnectAttempts
 		m.mu.Unlock()
 
+		if m.onReconnecting != nil {
+			m.onReconnecting(attempts)
+		}
+
 		if attempts%10 == 1 {
 			fmt.Printf("MQTT reconnect attempt %d...\n", attempts)
 		}
@@ -78,6 +84,9 @@ func NewMQTTClient(broker, clientID, lwtTopic string, lwtPayload []byte) *MQTTCl
 
 		if wasReconnecting && attempts > 0 {
 			fmt.Printf("MQTT reconnected after %d attempts\n", attempts)
+			if m.onReconnect != nil {
+				m.onReconnect()
+			}
 		}
 	})
 

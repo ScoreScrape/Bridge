@@ -27,6 +27,8 @@ type Bridge struct {
 	publishQueue     chan []byte
 	stop             chan struct{}
 	onConnectionLost func(error)
+	onMQTTReconnecting func(int)
+	onMQTTReconnected  func()
 }
 
 func New(bridgeID string) *Bridge {
@@ -42,6 +44,23 @@ func New(bridgeID string) *Bridge {
 
 func (b *Bridge) SetConnectionLostHandler(h func(error)) {
 	b.onConnectionLost = h
+}
+
+// SetMQTTReconnectingHandler is called on each MQTT reconnect attempt with the attempt count.
+func (b *Bridge) SetMQTTReconnectingHandler(h func(int)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.mqtt != nil {
+		b.mqtt.onReconnecting = h
+	}
+	b.onMQTTReconnecting = h
+}
+
+// this is called when MQTT successfully reconnects after a disconnect
+func (b *Bridge) SetMQTTReconnectedHandler(h func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onMQTTReconnected = h
 }
 
 func (b *Bridge) Connect(portName string, baudRate int) error {
@@ -72,6 +91,39 @@ func (b *Bridge) Connect(portName string, baudRate int) error {
 
 	mqtt := NewMQTTClient(MQTTBroker, b.id, statusTopic, lwt)
 	mqtt.onConnectionLost = b.onConnectionLost
+	mqtt.onReconnecting = b.onMQTTReconnecting
+	mqtt.onReconnect = func() {
+		// make sure we resubscribe to settings in case the broker dropped the session
+		mqtt.Subscribe(fmt.Sprintf("bridges/%s/settings", b.id), func(data []byte) {
+			var msg struct {
+				ConnectedBaud int `json:"connected_baud"`
+			}
+			if json.Unmarshal(data, &msg) == nil && msg.ConnectedBaud > 0 && msg.ConnectedBaud != b.baudRate {
+				b.reconnectSerial(msg.ConnectedBaud)
+			}
+		})
+
+		// republish state so broker retained messages are correct
+		b.statusMu.Lock()
+		currentStatus := b.status
+		b.statusMu.Unlock()
+
+		topic := fmt.Sprintf("bridges/%s/status", b.id)
+		payload, _ := json.Marshal(map[string]string{"status": currentStatus})
+		mqtt.PublishRetained(topic, payload)
+
+		version, _ := json.Marshal(map[string]string{"version": GetVersion()})
+		mqtt.Publish(topic, version)
+
+		appType, _ := json.Marshal(map[string]string{"type": GetAppType()})
+		mqtt.Publish(topic, appType)
+
+		fmt.Printf("Bridge status republished as %q after MQTT reconnect\n", currentStatus)
+
+		if b.onMQTTReconnected != nil {
+			b.onMQTTReconnected()
+		}
+	}
 
 	if err := mqtt.Connect(); err != nil {
 		b.serial.Close()
@@ -176,10 +228,12 @@ func (b *Bridge) Disconnect() error {
 		close(b.stop)
 	}
 
-	if b.mqtt != nil && b.mqtt.IsConnected() {
-		statusTopic := fmt.Sprintf("bridges/%s/status", b.id)
-		offline, _ := json.Marshal(map[string]string{"status": "offline"})
-		b.mqtt.PublishRetained(statusTopic, offline)
+	if b.mqtt != nil {
+		if b.mqtt.IsConnected() {
+			statusTopic := fmt.Sprintf("bridges/%s/status", b.id)
+			offline, _ := json.Marshal(map[string]string{"status": "offline"})
+			b.mqtt.PublishRetained(statusTopic, offline)
+		}
 		b.mqtt.Disconnect()
 	}
 
