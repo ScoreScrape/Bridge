@@ -41,3 +41,7 @@ $FYNE_CMD package --target darwin \
     --release
 
 echo "Built: ${APP_NAME}.app"
+
+# adhoc signing. we'll get an apple developer account as soon as I can afford one
+echo "signing ${APP_NAME}.app..."
+codesign --force --deep --sign - "${APP_NAME}.app"
