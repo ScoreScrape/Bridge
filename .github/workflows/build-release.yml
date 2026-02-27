@@ -90,19 +90,23 @@ jobs:
               --tags gui \
               --release
 
-            # find the app bundle, ad-hoc sign it, then zip
+            # find the app bundle, rename, sign, then zip
             for d in "ScoreScrape Bridge.app" "cmd/bridge/ScoreScrape Bridge.app"; do
               if [ -d "$d" ]; then
-                # Ad-hoc code sign — required for Apple Silicon, and
-                # lets Intel users right-click → Open without "damaged" errors
-                codesign --force --deep --sign - "$d"
+                DEST="ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
 
-                # Copy with ditto to preserve extended attributes
-                ditto "$d" "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app"
+                # Copy with ditto to preserve extended attributes and permissions
+                ditto "$d" "$DEST"
 
-                # Create a zip for release (ditto zip preserves resource forks/attrs)
+                # Ad-hoc code sign the renamed bundle — required for Apple Silicon,
+                # and lets Intel users right-click → Open without "damaged" errors.
+                # Sign after rename so the signature covers the final bundle name.
+                codesign --force --deep --sign - "$DEST"
+
+                # Create a zip for release (ditto zip preserves resource forks/attrs
+                # and Unix permissions — plain zip does not)
                 ditto -c -k --sequesterRsrc --keepParent \
-                  "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app" \
+                  "$DEST" \
                   "ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.zip"
                 break
               fi
@@ -114,7 +118,6 @@ jobs:
           name: gui-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.exe
-            ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.app
             ScoreScrape-Bridge-${{ matrix.os }}-${{ matrix.arch }}.zip
           if-no-files-found: ignore
           retention-days: 30
